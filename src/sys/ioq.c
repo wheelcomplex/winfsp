@@ -1,7 +1,7 @@
 /**
  * @file sys/ioq.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -684,6 +688,12 @@ BOOLEAN FspIoqRetryCompleteIrp(FSP_IOQ *Ioq, PIRP Irp, NTSTATUS *PResult)
     Result = FspCsqInsertIrpEx(&Ioq->RetriedIoCsq, Irp, 0, 0);
     if (NT_SUCCESS(Result))
     {
+        /* wake up a waiter */
+        KIRQL Irql;
+        KeAcquireSpinLock(&Ioq->SpinLock, &Irql);
+        FspIoqEventSet(&Ioq->PendingIrpEvent);
+        KeReleaseSpinLock(&Ioq->SpinLock, Irql);
+
         if (0 != PResult)
             *PResult = STATUS_PENDING;
         return TRUE;

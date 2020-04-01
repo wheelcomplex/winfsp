@@ -1,7 +1,7 @@
 /*
  * dotnet/FileSystemBase.cs
  *
- * Copyright 2015-2017 Bill Zissimopoulos
+ * Copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 using System;
@@ -337,6 +341,7 @@ namespace Fsp
         /// These flags determine whether the file was modified and whether to delete the file.
         /// </param>
         /// <seealso cref="CanDelete"/>
+        /// <seealso cref="SetDelete"/>
         /// <seealso cref="Close"/>
         public virtual void Cleanup(
             Object FileNode,
@@ -591,6 +596,22 @@ namespace Fsp
         /// <summary>
         /// Determines whether a file or directory can be deleted.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This function tests whether a file or directory can be safely deleted. This function does
+        /// not need to perform access checks, but may performs tasks such as check for empty
+        /// directories, etc.
+        /// </para><para>
+        /// This function should <b>NEVER</b> delete the file or directory in question. Deletion should
+        /// happen during Cleanup with the FspCleanupDelete flag set.
+        /// </para><para>
+        /// This function gets called when Win32 API's such as DeleteFile or RemoveDirectory are used.
+        /// It does not get called when a file or directory is opened with FILE_DELETE_ON_CLOSE.
+        /// </para><para>
+        /// NOTE: If both CanDelete and SetDelete are defined, SetDelete takes precedence. However
+        /// most file systems need only implement the CanDelete operation.
+        /// </para>
+        /// </remarks>
         /// <param name="FileNode">
         /// The file node of the file or directory to test for deletion.
         /// </param>
@@ -602,6 +623,7 @@ namespace Fsp
         /// </param>
         /// <returns>STATUS_SUCCESS or error code.</returns>
         /// <seealso cref="Cleanup"/>
+        /// <seealso cref="SetDelete"/>
         public virtual Int32 CanDelete(
             Object FileNode,
             Object FileDesc,
@@ -685,7 +707,7 @@ namespace Fsp
         /// Describes the modifications to apply to the file or directory security descriptor.
         /// </param>
         /// <returns>STATUS_SUCCESS or error code.</returns>
-        /// <seealso cref="ModifySecurityDescriptor"/>
+        /// <seealso cref="ModifySecurityDescriptorEx"/>
         public virtual Int32 SetSecurity(
             Object FileNode,
             Object FileDesc,
@@ -935,6 +957,237 @@ namespace Fsp
             StreamAllocationSize = default(UInt64);
             return false;
         }
+        /// <summary>
+        /// Gets directory information for a single file or directory within a parent directory.
+        /// </summary>
+        /// <param name="FileNode">
+        /// The file node of the parent directory.
+        /// </param>
+        /// <param name="FileDesc">
+        /// The file descriptor of the parent directory.
+        /// </param>
+        /// <param name="FileName">
+        /// The name of the file or directory to get information for. This name is relative
+        /// to the parent directory and is a single path component.
+        /// </param>
+        /// <param name="NormalizedName">
+        /// Receives the normalized name from the directory entry.
+        /// </param>
+        /// <param name="FileInfo">
+        /// Receives the file information.
+        /// </param>
+        /// <returns>STATUS_SUCCESS or error code.</returns>
+        public virtual Int32 GetDirInfoByName(
+            Object FileNode,
+            Object FileDesc,
+            String FileName,
+            out String NormalizedName,
+            out FileInfo FileInfo)
+        {
+            NormalizedName = default(String);
+            FileInfo = default(FileInfo);
+            return STATUS_INVALID_DEVICE_REQUEST;
+        }
+        /// <summary>
+        /// Processes a control code.
+        /// </summary>
+        /// <remarks>
+        /// This function is called when a program uses the DeviceIoControl API.
+        /// </remarks>
+        /// <param name="FileNode">
+        /// The file node of the file or directory to be controled.
+        /// </param>
+        /// <param name="FileDesc">
+        /// The file descriptor of the file or directory to be controled.
+        /// </param>
+        /// <param name="ControlCode">
+        /// The control code for the operation. This code must have a DeviceType with bit
+        /// 0x8000 set and must have a TransferType of METHOD_BUFFERED.
+        /// </param>
+        /// <param name="InputBuffer">
+        /// Pointer to a buffer that contains the input data.
+        /// </param>
+        /// <param name="InputBufferLength">
+        /// Input data length.
+        /// </param>
+        /// <param name="OutputBuffer">
+        ///  Pointer to a buffer that will receive the output data.
+        /// </param>
+        /// <param name="OutputBufferLength">
+        /// Output data length.
+        /// </param>
+        /// <param name="BytesTransferred">
+        /// Receives the actual number of bytes transferred.
+        /// </param>
+        /// <returns>STATUS_SUCCESS or error code.</returns>
+        public virtual Int32 Control(
+            Object FileNode,
+            Object FileDesc,
+            UInt32 ControlCode,
+            IntPtr InputBuffer, UInt32 InputBufferLength,
+            IntPtr OutputBuffer, UInt32 OutputBufferLength,
+            out UInt32 BytesTransferred)
+        {
+            BytesTransferred = default(UInt32);
+            return STATUS_INVALID_DEVICE_REQUEST;
+        }
+        /// <summary>
+        /// Sets the file delete flag.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This function sets a flag to indicates whether the FSD file should delete a file
+        /// when it is closed. This function does not need to perform access checks, but may
+        /// performs tasks such as check for empty directories, etc.
+        /// </para><para>
+        /// This function should <b>NEVER</b> delete the file or directory in question. Deletion should
+        /// happen during Cleanup with the FspCleanupDelete flag set.
+        /// </para><para>
+        /// This function gets called when Win32 API's such as DeleteFile or RemoveDirectory are used.
+        /// It does not get called when a file or directory is opened with FILE_DELETE_ON_CLOSE.
+        /// </para><para>
+        /// NOTE: If both CanDelete and SetDelete are defined, SetDelete takes precedence. However
+        /// most file systems need only implement the CanDelete operation.
+        /// </para>
+        /// </remarks>
+        /// <param name="FileNode">
+        /// The file node of the file or directory to set the delete flag for.
+        /// </param>
+        /// <param name="FileDesc">
+        /// The file descriptor of the file or directory to set the delete flag for.
+        /// </param>
+        /// <param name="FileName">
+        /// The name of the file or directory to set the delete flag for.
+        /// </param>
+        /// <param name="DeleteFile">
+        /// If set to TRUE the FSD indicates that the file will be deleted on Cleanup; otherwise
+        /// it will not be deleted. It is legal to receive multiple SetDelete calls for the same
+        /// file with different DeleteFile parameters.
+        /// </param>
+        /// <returns>STATUS_SUCCESS or error code.</returns>
+        /// <seealso cref="Cleanup"/>
+        /// <seealso cref="CanDelete"/>
+        public virtual Int32 SetDelete(
+            Object FileNode,
+            Object FileDesc,
+            String FileName,
+            Boolean DeleteFile)
+        {
+            if (DeleteFile)
+                return CanDelete(FileNode, FileDesc, FileName);
+            else
+                return STATUS_SUCCESS;
+        }
+        public virtual Int32 CreateEx(
+            String FileName,
+            UInt32 CreateOptions,
+            UInt32 GrantedAccess,
+            UInt32 FileAttributes,
+            Byte[] SecurityDescriptor,
+            UInt64 AllocationSize,
+            IntPtr ExtraBuffer,
+            UInt32 ExtraLength,
+            Boolean ExtraBufferIsReparsePoint,
+            out Object FileNode,
+            out Object FileDesc,
+            out FileInfo FileInfo,
+            out String NormalizedName)
+        {
+            return Create(
+                FileName,
+                CreateOptions,
+                GrantedAccess,
+                FileAttributes,
+                SecurityDescriptor,
+                AllocationSize,
+                out FileNode,
+                out FileDesc,
+                out FileInfo,
+                out NormalizedName);
+        }
+        public virtual Int32 OverwriteEx(
+            Object FileNode,
+            Object FileDesc,
+            UInt32 FileAttributes,
+            Boolean ReplaceFileAttributes,
+            UInt64 AllocationSize,
+            IntPtr Ea,
+            UInt32 EaLength,
+            out FileInfo FileInfo)
+        {
+            return Overwrite(
+                FileNode,
+                FileDesc,
+                FileAttributes,
+                ReplaceFileAttributes,
+                AllocationSize,
+                out FileInfo);
+        }
+        public virtual Int32 GetEa(
+            Object FileNode,
+            Object FileDesc,
+            IntPtr Ea,
+            UInt32 EaLength,
+            out UInt32 BytesTransferred)
+        {
+            Object Context = null;
+            String EaName;
+            Byte[] EaValue;
+            Boolean NeedEa;
+            FullEaInformation EaInfo = new FullEaInformation();
+            BytesTransferred = default(UInt32);
+            while (GetEaEntry(FileNode, FileDesc, ref Context, out EaName, out EaValue, out NeedEa))
+            {
+                EaInfo.Set(EaName, EaValue, NeedEa);
+                if (!Api.FspFileSystemAddEa(ref EaInfo, Ea, EaLength, out BytesTransferred))
+                    return STATUS_SUCCESS;
+            }
+            Api.FspFileSystemEndEa(Ea, EaLength, out BytesTransferred);
+            return STATUS_SUCCESS;
+        }
+        public virtual Boolean GetEaEntry(
+            Object FileNode,
+            Object FileDesc,
+            ref Object Context,
+            out String EaName,
+            out Byte[] EaValue,
+            out Boolean NeedEa)
+        {
+            EaName = default(String);
+            EaValue = default(Byte[]);
+            NeedEa = default(Boolean);
+            return false;
+        }
+        public virtual Int32 SetEa(
+            Object FileNode,
+            Object FileDesc,
+            IntPtr Ea,
+            UInt32 EaLength,
+            out FileInfo FileInfo)
+        {
+            Int32 Result;
+            Result = SetEaEntries(
+                FileNode,
+                FileDesc,
+                Ea,
+                EaLength);
+            if (0 > Result)
+            {
+                FileInfo = default(FileInfo);
+                return Result;
+            }
+            return GetFileInfo(FileNode, FileDesc, out FileInfo);
+        }
+        public virtual Int32 SetEaEntry(
+            Object FileNode,
+            Object FileDesc,
+            ref Object Context,
+            String EaName,
+            Byte[] EaValue,
+            Boolean NeedEa)
+        {
+            return STATUS_INVALID_DEVICE_REQUEST;
+        }
 
         /* helpers */
         /// <summary>
@@ -952,7 +1205,17 @@ namespace Fsp
             return Api.FspWin32FromNtStatus(Status);
         }
         /// <summary>
-        /// Modifies a security descriptor.
+        /// Gets the originating process ID.
+        /// </summary>
+        /// <remarks>
+        /// Valid only during Create, Open and Rename requests when the target exists.
+        /// </remarks>
+        public static int GetOperationProcessId()
+        {
+            return (int)Api.FspFileSystemOperationProcessId();
+        }
+        /// <summary>
+        /// Modifies a security descriptor. [OBSOLETE]
         /// </summary>
         /// <remarks>
         /// This is a helper for implementing the SetSecurity operation.
@@ -968,6 +1231,7 @@ namespace Fsp
         /// </param>
         /// <returns>The modified security descriptor.</returns>
         /// <seealso cref="SetSecurity"/>
+        [Obsolete("use ModifySecurityDescriptorEx")]
         public static byte[] ModifySecurityDescriptor(
             Byte[] SecurityDescriptor,
             AccessControlSections Sections,
@@ -986,6 +1250,47 @@ namespace Fsp
                 SecurityDescriptor,
                 SecurityInformation,
                 ModificationDescriptor);
+        }
+        /// <summary>
+        /// Modifies a security descriptor.
+        /// </summary>
+        /// <remarks>
+        /// This is a helper for implementing the SetSecurity operation.
+        /// </remarks>
+        /// <param name="SecurityDescriptor">
+        /// The original security descriptor.
+        /// </param>
+        /// <param name="Sections">
+        /// Describes what parts of the file or directory security descriptor should be modified.
+        /// </param>
+        /// <param name="ModificationDescriptor">
+        /// Describes the modifications to apply to the file or directory security descriptor.
+        /// </param>
+        /// <param name="ModifiedDescriptor">
+        /// The modified security descriptor. This parameter is modified only on success.
+        /// </param>
+        /// <returns>STATUS_SUCCESS or error code.</returns>
+        /// <seealso cref="SetSecurity"/>
+        public static Int32 ModifySecurityDescriptorEx(
+            Byte[] SecurityDescriptor,
+            AccessControlSections Sections,
+            Byte[] ModificationDescriptor,
+            ref Byte[] ModifiedDescriptor)
+        {
+            UInt32 SecurityInformation = 0;
+            if (0 != (Sections & AccessControlSections.Owner))
+                SecurityInformation |= 1/*OWNER_SECURITY_INFORMATION*/;
+            if (0 != (Sections & AccessControlSections.Group))
+                SecurityInformation |= 2/*GROUP_SECURITY_INFORMATION*/;
+            if (0 != (Sections & AccessControlSections.Access))
+                SecurityInformation |= 4/*DACL_SECURITY_INFORMATION*/;
+            if (0 != (Sections & AccessControlSections.Audit))
+                SecurityInformation |= 8/*SACL_SECURITY_INFORMATION*/;
+            return Api.ModifySecurityDescriptorEx(
+                SecurityDescriptor,
+                SecurityInformation,
+                ModificationDescriptor,
+                ref ModifiedDescriptor);
         }
         public Int32 SeekableReadDirectory(
             Object FileNode,
@@ -1087,6 +1392,16 @@ namespace Fsp
             }
         }
         /// <summary>
+        /// Makes a byte array that contains a reparse point.
+        /// </summary>
+        /// <returns>The reparse point byte array.</returns>
+        public static Byte[] MakeReparsePoint(
+            IntPtr Buffer,
+            UInt32 Size)
+        {
+            return Api.MakeReparsePoint(Buffer, (UIntPtr)Size);
+        }
+        /// <summary>
         /// Gets the reparse tag from reparse data.
         /// </summary>
         /// <param name="ReparseData">
@@ -1147,6 +1462,26 @@ namespace Fsp
             {
                 return self.ExceptionHandler(ex);
             }
+        }
+        public Int32 SetEaEntries(
+            Object FileNode,
+            Object FileDesc,
+            IntPtr Ea,
+            UInt32 EaLength)
+        {
+            return Api.FspFileSystemEnumerateEa(
+                FileNode,
+                FileDesc,
+                this.SetEaEntry,
+                Ea,
+                EaLength);
+        }
+        public static UInt32 GetEaEntrySize(
+            String EaName,
+            Byte[] EaValue,
+            Boolean NeedEa)
+        {
+            return FullEaInformation.PackedSize(EaName, EaValue, NeedEa);
         }
     }
 

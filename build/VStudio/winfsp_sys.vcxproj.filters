@@ -12,6 +12,12 @@
     <Filter Include="Include\winfsp">
       <UniqueIdentifier>{904f0df1-2fb8-4f84-aa46-fa929488c39a}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source\shared">
+      <UniqueIdentifier>{c4db9aa7-9474-4f0b-b38b-343a8a1e5686}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\shared\ku">
+      <UniqueIdentifier>{df147bf8-bbdf-4de7-95ce-1e281925725a}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\src\sys\driver.c">
@@ -101,6 +107,21 @@
     <ClCompile Include="..\..\src\sys\psbuffer.c">
       <Filter>Source</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\sys\mup.c">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\sys\fsext.c">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\sys\mountdev.c">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\shared\ku\posix.c">
+      <Filter>Source\shared\ku</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\shared\ku\uuid5.c">
+      <Filter>Source\shared\ku</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\src\sys\driver.h">
@@ -108,6 +129,15 @@
     </ClInclude>
     <ClInclude Include="..\..\inc\winfsp\fsctl.h">
       <Filter>Include\winfsp</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\opt\fsext\inc\winfsp\fsext.h">
+      <Filter>Include\winfsp</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\shared\ku\library.h">
+      <Filter>Source\shared\ku</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\shared\ku\config.h">
+      <Filter>Source\shared\ku</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

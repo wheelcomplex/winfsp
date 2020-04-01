@@ -1,7 +1,7 @@
 /**
  * @file dll/security.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <dll/library.h>
@@ -337,26 +341,25 @@ FSP_API NTSTATUS FspAccessCheckEx(FSP_FILE_SYSTEM *FileSystem,
 
     if (Request->Req.Create.UserMode)
     {
-        if (0 != (FileAttributes & FILE_ATTRIBUTE_READONLY))
+        if (FILE_ATTRIBUTE_READONLY == (FileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY)) &&
+            (DesiredAccess & (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD)))
         {
-            if (DesiredAccess &
-                (FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD))
-            {
-                Result = STATUS_ACCESS_DENIED;
-                goto exit;
-            }
-            if (Request->Req.Create.CreateOptions & FILE_DELETE_ON_CLOSE)
-            {
-                Result = STATUS_CANNOT_DELETE;
-                goto exit;
-            }
+            Result = STATUS_ACCESS_DENIED;
+            goto exit;
+        }
+
+        if (FILE_ATTRIBUTE_READONLY == (FileAttributes & FILE_ATTRIBUTE_READONLY) &&
+            (Request->Req.Create.CreateOptions & FILE_DELETE_ON_CLOSE))
+        {
+            Result = STATUS_CANNOT_DELETE;
+            goto exit;
         }
 
         if (0 == SecurityDescriptorSize)
             *PGrantedAccess = (MAXIMUM_ALLOWED & DesiredAccess) ?
                 FspFileGenericMapping.GenericAll : DesiredAccess;
 
-        if (0 != (FileAttributes & FILE_ATTRIBUTE_READONLY) &&
+        if (FILE_ATTRIBUTE_READONLY == (FileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY)) &&
             0 != (MAXIMUM_ALLOWED & DesiredAccess))
             *PGrantedAccess &= ~(FILE_WRITE_DATA | FILE_APPEND_DATA |
                 FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD);

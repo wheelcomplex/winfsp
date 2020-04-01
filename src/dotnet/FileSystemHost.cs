@@ -1,7 +1,7 @@
 /*
  * dotnet/FileSystemHost.cs
  *
- * Copyright 2015-2017 Bill Zissimopoulos
+ * Copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 using System;
@@ -36,6 +40,7 @@ namespace Fsp
         /// <param name="FileSystem">The file system to host.</param>
         public FileSystemHost(FileSystemBase FileSystem)
         {
+            _VolumeParams.Version = (UInt16)Marshal.SizeOf(_VolumeParams);
             _VolumeParams.Flags = VolumeParams.UmFileContextIsFullContext;
             _FileSystem = FileSystem;
         }
@@ -122,6 +127,86 @@ namespace Fsp
             set { _VolumeParams.FileInfoTimeout = value; }
         }
         /// <summary>
+        /// Gets or sets the volume information timeout.
+        /// </summary>
+        public UInt32 VolumeInfoTimeout
+        {
+            get
+            {
+                return 0 != (_VolumeParams.AdditionalFlags & VolumeParams.VolumeInfoTimeoutValid) ?
+                    _VolumeParams.VolumeInfoTimeout : _VolumeParams.FileInfoTimeout;
+            }
+            set
+            {
+                _VolumeParams.AdditionalFlags |= VolumeParams.VolumeInfoTimeoutValid;
+                _VolumeParams.VolumeInfoTimeout = value;
+            }
+        }
+        /// <summary>
+        /// Gets or sets the directory information timeout.
+        /// </summary>
+        public UInt32 DirInfoTimeout
+        {
+            get
+            {
+                return 0 != (_VolumeParams.AdditionalFlags & VolumeParams.DirInfoTimeoutValid) ?
+                    _VolumeParams.DirInfoTimeout : _VolumeParams.FileInfoTimeout;
+            }
+            set
+            {
+                _VolumeParams.AdditionalFlags |= VolumeParams.DirInfoTimeoutValid;
+                _VolumeParams.DirInfoTimeout = value;
+            }
+        }
+        /// <summary>
+        /// Gets or sets the security information timeout.
+        /// </summary>
+        public UInt32 SecurityTimeout
+        {
+            get
+            {
+                return 0 != (_VolumeParams.AdditionalFlags & VolumeParams.SecurityTimeoutValid) ?
+                    _VolumeParams.SecurityTimeout : _VolumeParams.FileInfoTimeout;
+            }
+            set
+            {
+                _VolumeParams.AdditionalFlags |= VolumeParams.SecurityTimeoutValid;
+                _VolumeParams.SecurityTimeout = value;
+            }
+        }
+        /// <summary>
+        /// Gets or sets the stream information timeout.
+        /// </summary>
+        public UInt32 StreamInfoTimeout
+        {
+            get
+            {
+                return 0 != (_VolumeParams.AdditionalFlags & VolumeParams.StreamInfoTimeoutValid) ?
+                    _VolumeParams.StreamInfoTimeout : _VolumeParams.FileInfoTimeout;
+            }
+            set
+            {
+                _VolumeParams.AdditionalFlags |= VolumeParams.StreamInfoTimeoutValid;
+                _VolumeParams.StreamInfoTimeout = value;
+            }
+        }
+        /// <summary>
+        /// Gets or sets the EA information timeout.
+        /// </summary>
+        public UInt32 EaTimeout
+        {
+            get
+            {
+                return 0 != (_VolumeParams.AdditionalFlags & VolumeParams.EaTimeoutValid) ?
+                    _VolumeParams.EaTimeout : _VolumeParams.FileInfoTimeout;
+            }
+            set
+            {
+                _VolumeParams.AdditionalFlags |= VolumeParams.EaTimeoutValid;
+                _VolumeParams.EaTimeout = value;
+            }
+        }
+        /// <summary>
         /// Gets or sets a value that determines whether the file system is case sensitive.
         /// </summary>
         public Boolean CaseSensitiveSearch
@@ -179,6 +264,14 @@ namespace Fsp
             get { return 0 != (_VolumeParams.Flags & VolumeParams.NamedStreams); }
             set { _VolumeParams.Flags |= (value ? VolumeParams.NamedStreams : 0); }
         }
+        /// <summary>
+        /// Gets or sets a value that determines whether the file system supports extended attributes.
+        /// </summary>
+        public Boolean ExtendedAttributes
+        {
+            get { return 0 != (_VolumeParams.Flags & VolumeParams.ExtendedAttributes); }
+            set { _VolumeParams.Flags |= (value ? VolumeParams.ExtendedAttributes : 0); }
+        }
         public Boolean PostCleanupWhenModifiedOnly
         {
             get { return 0 != (_VolumeParams.Flags & VolumeParams.PostCleanupWhenModifiedOnly); }
@@ -188,6 +281,36 @@ namespace Fsp
         {
             get { return 0 != (_VolumeParams.Flags & VolumeParams.PassQueryDirectoryPattern); }
             set { _VolumeParams.Flags |= (value ? VolumeParams.PassQueryDirectoryPattern : 0); }
+        }
+        public Boolean PassQueryDirectoryFileName
+        {
+            get { return 0 != (_VolumeParams.Flags & VolumeParams.PassQueryDirectoryFileName); }
+            set { _VolumeParams.Flags |= (value ? VolumeParams.PassQueryDirectoryFileName : 0); }
+        }
+        public Boolean FlushAndPurgeOnCleanup
+        {
+            get { return 0 != (_VolumeParams.Flags & VolumeParams.FlushAndPurgeOnCleanup); }
+            set { _VolumeParams.Flags |= (value ? VolumeParams.FlushAndPurgeOnCleanup : 0); }
+        }
+        public Boolean DeviceControl
+        {
+            get { return 0 != (_VolumeParams.Flags & VolumeParams.DeviceControl); }
+            set { _VolumeParams.Flags |= (value ? VolumeParams.DeviceControl : 0); }
+        }
+        public Boolean AllowOpenInKernelMode
+        {
+            get { return 0 != (_VolumeParams.Flags & VolumeParams.AllowOpenInKernelMode); }
+            set { _VolumeParams.Flags |= (value ? VolumeParams.AllowOpenInKernelMode : 0); }
+        }
+        public Boolean WslFeatures
+        {
+            get { return 0 != (_VolumeParams.Flags & VolumeParams.WslFeatures); }
+            set { _VolumeParams.Flags |= (value ? VolumeParams.WslFeatures : 0); }
+        }
+        public Boolean RejectIrpPriorToTransact0
+        {
+            get { return 0 != (_VolumeParams.Flags & VolumeParams.RejectIrpPriorToTransact0); }
+            set { _VolumeParams.Flags |= (value ? VolumeParams.RejectIrpPriorToTransact0 : 0); }
         }
         /// <summary>
         /// Gets or sets the prefix for a network file system.
@@ -242,8 +365,41 @@ namespace Fsp
         /// A value of 0 disables all debug logging.
         /// A value of -1 enables all debug logging.
         /// </param>
-        /// <returns></returns>
+        /// <returns>STATUS_SUCCESS or error code.</returns>
         public Int32 Mount(String MountPoint,
+            Byte[] SecurityDescriptor = null,
+            Boolean Synchronized = false,
+            UInt32 DebugLog = 0)
+        {
+            return MountEx(MountPoint, 0, SecurityDescriptor, Synchronized, DebugLog);
+        }
+        /// <summary>
+        /// Mounts a file system.
+        /// </summary>
+        /// <param name="MountPoint">
+        /// The mount point for the new file system. A value of null means that
+        /// the file system should use the next available drive letter counting
+        /// downwards from Z: as its mount point.
+        /// </param>
+        /// <param name="ThreadCount">
+        /// Number of threads to use to service file system requests. A value
+        /// of 0 means that the default number of threads should be used.
+        /// </param>
+        /// <param name="SecurityDescriptor">
+        /// Security descriptor to use if mounting on (newly created) directory.
+        /// A value of null means the directory should be created with default
+        /// security.
+        /// </param>
+        /// <param name="Synchronized">
+        /// If true file system operations are synchronized using an exclusive lock.
+        /// </param>
+        /// <param name="DebugLog">
+        /// A value of 0 disables all debug logging.
+        /// A value of -1 enables all debug logging.
+        /// </param>
+        /// <returns>STATUS_SUCCESS or error code.</returns>
+        public Int32 MountEx(String MountPoint,
+            UInt32 ThreadCount,
             Byte[] SecurityDescriptor = null,
             Boolean Synchronized = false,
             UInt32 DebugLog = 0)
@@ -283,7 +439,7 @@ namespace Fsp
                 }
                 if (0 <= Result)
                 {
-                    Result = Api.FspFileSystemStartDispatcher(_FileSystemPtr, 0);
+                    Result = Api.FspFileSystemStartDispatcher(_FileSystemPtr, ThreadCount);
                     if (0 > Result)
                         try
                         {
@@ -341,6 +497,90 @@ namespace Fsp
         public static Int32 SetDebugLogFile(String FileName)
         {
             return Api.SetDebugLogFile(FileName);
+        }
+        /// <summary>
+        /// Return the installed version of WinFsp.
+        /// </summary>
+        public static Version Version()
+        {
+            return Api.GetVersion();
+        }
+        /// <summary>
+        /// Returns a RequestHint to reference the current operation asynchronously.
+        /// </summary>
+        public UInt64 GetOperationRequestHint()
+        {
+            return Api.FspFileSystemGetOperationRequestHint();
+        }
+        /// <summary>
+        /// Asynchronously complete a Read operation.
+        /// </summary>
+        /// <param name="RequestHint">
+        /// A reference to the operation to complete.
+        /// </param>
+        /// <param name="Status">
+        /// STATUS_SUCCESS or error code.
+        /// </param>
+        /// <param name="BytesTransferred">
+        /// Number of bytes read.
+        /// </param>
+        public void SendReadResponse(UInt64 RequestHint, Int32 Status, UInt32 BytesTransferred)
+        {
+            FspFsctlTransactRsp Response = default(FspFsctlTransactRsp);
+            Response.Size = 128;
+            Response.Kind = (UInt32)FspFsctlTransact.ReadKind;
+            Response.Hint = RequestHint;
+            Response.IoStatus.Information = BytesTransferred;
+            Response.IoStatus.Status = (UInt32)Status;
+            Api.FspFileSystemSendResponse(_FileSystemPtr, ref Response);
+        }
+        /// <summary>
+        /// Asynchronously complete a Write operation.
+        /// </summary>
+        /// <param name="RequestHint">
+        /// A reference to the operation to complete.
+        /// </param>
+        /// <param name="Status">
+        /// STATUS_SUCCESS or error code.
+        /// </param>
+        /// <param name="BytesTransferred">
+        /// The number of bytes written.
+        /// </param>
+        /// <param name="FileInfo">
+        /// Updated file information.
+        /// </param>
+        public void SendWriteResponse(UInt64 RequestHint, Int32 Status, UInt32 BytesTransferred, ref FileInfo FileInfo)
+        {
+            FspFsctlTransactRsp Response = default(FspFsctlTransactRsp);
+            Response.Size = 128;
+            Response.Kind = (UInt32)FspFsctlTransact.WriteKind;
+            Response.Hint = RequestHint;
+            Response.IoStatus.Information = BytesTransferred;
+            Response.IoStatus.Status = (UInt32)Status;
+            Response.WriteFileInfo = FileInfo;
+            Api.FspFileSystemSendResponse(_FileSystemPtr, ref Response);
+        }
+        /// <summary>
+        /// Asynchronously complete a ReadDirectory operation.
+        /// </summary>
+        /// <param name="RequestHint">
+        /// A reference to the operation to complete.
+        /// </param>
+        /// <param name="Status">
+        /// STATUS_SUCCESS or error code.
+        /// </param>
+        /// <param name="BytesTransferred">
+        /// Number of bytes read.
+        /// </param>
+        public void SendReadDirectoryResponse(UInt64 RequestHint, Int32 Status, UInt32 BytesTransferred)
+        {
+            FspFsctlTransactRsp Response = default(FspFsctlTransactRsp);
+            Response.Size = 128;
+            Response.Kind = (UInt32)FspFsctlTransact.QueryDirectoryKind;
+            Response.Hint = RequestHint;
+            Response.IoStatus.Information = BytesTransferred;
+            Response.IoStatus.Status = (UInt32)Status;
+            Api.FspFileSystemSendResponse(_FileSystemPtr, ref Response);
         }
 
         /* FSP_FILE_SYSTEM_INTERFACE */
@@ -433,6 +673,9 @@ namespace Fsp
             UInt32 FileAttributes,
             IntPtr SecurityDescriptor,
             UInt64 AllocationSize,
+            IntPtr ExtraBuffer,
+            UInt32 ExtraLength,
+            Boolean ExtraBufferIsReparsePoint,
             ref FullContext FullContext,
             ref OpenFileInfo OpenFileInfo)
         {
@@ -442,13 +685,16 @@ namespace Fsp
                 Object FileNode, FileDesc;
                 String NormalizedName;
                 Int32 Result;
-                Result = FileSystem.Create(
+                Result = FileSystem.CreateEx(
                     FileName,
                     CreateOptions,
                     GrantedAccess,
                     FileAttributes,
                     Api.MakeSecurityDescriptor(SecurityDescriptor),
                     AllocationSize,
+                    ExtraBuffer,
+                    ExtraLength,
+                    ExtraBufferIsReparsePoint,
                     out FileNode,
                     out FileDesc,
                     out OpenFileInfo.FileInfo,
@@ -507,6 +753,8 @@ namespace Fsp
             UInt32 FileAttributes,
             Boolean ReplaceFileAttributes,
             UInt64 AllocationSize,
+            IntPtr Ea,
+            UInt32 EaLength,
             out FileInfo FileInfo)
         {
             FileSystemBase FileSystem = (FileSystemBase)Api.GetUserContext(FileSystemPtr);
@@ -514,12 +762,14 @@ namespace Fsp
             {
                 Object FileNode, FileDesc;
                 Api.GetFullContext(ref FullContext, out FileNode, out FileDesc);
-                return FileSystem.Overwrite(
+                return FileSystem.OverwriteEx(
                     FileNode,
                     FileDesc,
                     FileAttributes,
                     ReplaceFileAttributes,
                     AllocationSize,
+                    Ea,
+                    EaLength,
                     out FileInfo);
             }
             catch (Exception ex)
@@ -725,26 +975,6 @@ namespace Fsp
             catch (Exception ex)
             {
                 FileInfo = default(FileInfo);
-                return ExceptionHandler(FileSystem, ex);
-            }
-        }
-        private static Int32 CanDelete(
-            IntPtr FileSystemPtr,
-            ref FullContext FullContext,
-            String FileName)
-        {
-            FileSystemBase FileSystem = (FileSystemBase)Api.GetUserContext(FileSystemPtr);
-            try
-            {
-                Object FileNode, FileDesc;
-                Api.GetFullContext(ref FullContext, out FileNode, out FileDesc);
-                return FileSystem.CanDelete(
-                    FileNode,
-                    FileDesc,
-                    FileName);
-            }
-            catch (Exception ex)
-            {
                 return ExceptionHandler(FileSystem, ex);
             }
         }
@@ -987,15 +1217,144 @@ namespace Fsp
                 return ExceptionHandler(FileSystem, ex);
             }
         }
+        private static Int32 GetDirInfoByName(
+            IntPtr FileSystemPtr,
+            ref FullContext FullContext,
+            String FileName,
+            out DirInfo DirInfo)
+        {
+            FileSystemBase FileSystem = (FileSystemBase)Api.GetUserContext(FileSystemPtr);
+            try
+            {
+                Object FileNode, FileDesc;
+                String NormalizedName;
+                Api.GetFullContext(ref FullContext, out FileNode, out FileDesc);
+                DirInfo = default(DirInfo);
+                Int32 Result = FileSystem.GetDirInfoByName(
+                    FileNode,
+                    FileDesc,
+                    FileName,
+                    out NormalizedName,
+                    out DirInfo.FileInfo);
+                DirInfo.SetFileNameBuf(NormalizedName);
+                return Result;
+            }
+            catch (Exception ex)
+            {
+                DirInfo = default(DirInfo);
+                return ExceptionHandler(FileSystem, ex);
+            }
+        }
+        private static Int32 Control(
+            IntPtr FileSystemPtr,
+            ref FullContext FullContext,
+            UInt32 ControlCode,
+            IntPtr InputBuffer, UInt32 InputBufferLength,
+            IntPtr OutputBuffer, UInt32 OutputBufferLength,
+            out UInt32 PBytesTransferred)
+        {
+            FileSystemBase FileSystem = (FileSystemBase)Api.GetUserContext(FileSystemPtr);
+            try
+            {
+                Object FileNode, FileDesc;
+                Api.GetFullContext(ref FullContext, out FileNode, out FileDesc);
+                return FileSystem.Control(
+                    FileNode,
+                    FileDesc,
+                    ControlCode,
+                    InputBuffer,
+                    InputBufferLength,
+                    OutputBuffer,
+                    OutputBufferLength,
+                    out PBytesTransferred);
+            }
+            catch (Exception ex)
+            {
+                PBytesTransferred = default(UInt32);
+                return ExceptionHandler(FileSystem, ex);
+            }
+        }
+        private static Int32 SetDelete(
+            IntPtr FileSystemPtr,
+            ref FullContext FullContext,
+            String FileName,
+            Boolean DeleteFile)
+        {
+            FileSystemBase FileSystem = (FileSystemBase)Api.GetUserContext(FileSystemPtr);
+            try
+            {
+                Object FileNode, FileDesc;
+                Api.GetFullContext(ref FullContext, out FileNode, out FileDesc);
+                return FileSystem.SetDelete(
+                    FileNode,
+                    FileDesc,
+                    FileName,
+                    DeleteFile);
+            }
+            catch (Exception ex)
+            {
+                return ExceptionHandler(FileSystem, ex);
+            }
+        }
+        private static Int32 GetEa(
+            IntPtr FileSystemPtr,
+            ref FullContext FullContext,
+            IntPtr Ea,
+            UInt32 EaLength,
+            out UInt32 PBytesTransferred)
+        {
+            FileSystemBase FileSystem = (FileSystemBase)Api.GetUserContext(FileSystemPtr);
+            try
+            {
+                Object FileNode, FileDesc;
+                Api.GetFullContext(ref FullContext, out FileNode, out FileDesc);
+                return FileSystem.GetEa(
+                    FileNode,
+                    FileDesc,
+                    Ea,
+                    EaLength,
+                    out PBytesTransferred);
+            }
+            catch (Exception ex)
+            {
+                PBytesTransferred = default(UInt32);
+                return ExceptionHandler(FileSystem, ex);
+            }
+        }
+        private static Int32 SetEa(
+            IntPtr FileSystemPtr,
+            ref FullContext FullContext,
+            IntPtr Ea,
+            UInt32 EaLength,
+            out FileInfo FileInfo)
+        {
+            FileSystemBase FileSystem = (FileSystemBase)Api.GetUserContext(FileSystemPtr);
+            try
+            {
+                Object FileNode, FileDesc;
+                Api.GetFullContext(ref FullContext, out FileNode, out FileDesc);
+                return FileSystem.SetEa(
+                    FileNode,
+                    FileDesc,
+                    Ea,
+                    EaLength,
+                    out FileInfo);
+            }
+            catch (Exception ex)
+            {
+                FileInfo = default(FileInfo);
+                return ExceptionHandler(FileSystem, ex);
+            }
+        }
 
         static FileSystemHost()
         {
             _FileSystemInterface.GetVolumeInfo = GetVolumeInfo;
             _FileSystemInterface.SetVolumeLabel = SetVolumeLabel;
             _FileSystemInterface.GetSecurityByName = GetSecurityByName;
-            _FileSystemInterface.Create = Create;
+            _FileSystemInterface.CreateEx = Create;
             _FileSystemInterface.Open = Open;
-            _FileSystemInterface.Overwrite = Overwrite;
+            _FileSystemInterface.OverwriteEx = Overwrite;
             _FileSystemInterface.Cleanup = Cleanup;
             _FileSystemInterface.Close = Close;
             _FileSystemInterface.Read = Read;
@@ -1004,7 +1363,6 @@ namespace Fsp
             _FileSystemInterface.GetFileInfo = GetFileInfo;
             _FileSystemInterface.SetBasicInfo = SetBasicInfo;
             _FileSystemInterface.SetFileSize = SetFileSize;
-            _FileSystemInterface.CanDelete = CanDelete;
             _FileSystemInterface.Rename = Rename;
             _FileSystemInterface.GetSecurity = GetSecurity;
             _FileSystemInterface.SetSecurity = SetSecurity;
@@ -1014,6 +1372,11 @@ namespace Fsp
             _FileSystemInterface.SetReparsePoint = SetReparsePoint;
             _FileSystemInterface.DeleteReparsePoint = DeleteReparsePoint;
             _FileSystemInterface.GetStreamInfo = GetStreamInfo;
+            _FileSystemInterface.GetDirInfoByName = GetDirInfoByName;
+            _FileSystemInterface.Control = Control;
+            _FileSystemInterface.SetDelete = SetDelete;
+            _FileSystemInterface.GetEa = GetEa;
+            _FileSystemInterface.SetEa = SetEa;
 
             _FileSystemInterfacePtr = Marshal.AllocHGlobal(FileSystemInterface.Size);
             Marshal.StructureToPtr(_FileSystemInterface, _FileSystemInterfacePtr, false);

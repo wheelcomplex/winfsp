@@ -1,7 +1,7 @@
 /**
  * @file sys/driver.h
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #ifndef WINFSP_SYS_DRIVER_H_INCLUDED
@@ -22,15 +26,26 @@
 
 #define POOL_NX_OPTIN                   1
 #include <ntifs.h>
+#include <mountdev.h>
+#include <ntddstor.h>
 #include <ntstrsafe.h>
 #include <wdmsec.h>
 #include <winfsp/fsctl.h>
+#include <winfsp/fsext.h>
+
+#include <shared/ku/config.h>
 
 /* disable warnings */
 #pragma warning(disable:4100)           /* unreferenced formal parameter */
 #pragma warning(disable:4200)           /* zero-sized array in struct/union */
 
 #define DRIVER_NAME                     FSP_FSCTL_DRIVER_NAME
+
+#if _WIN64
+#define FSP_REGKEY                      "\\Registry\\Machine\\Software\\WOW6432Node\\WinFsp"
+#else
+#define FSP_REGKEY                      "\\Registry\\Machine\\Software\\WinFsp"
+#endif
 
 /* IoCreateDeviceSecure default SDDL's */
 #define FSP_FSCTL_DEVICE_SDDL           "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GR;;;WD)"
@@ -180,6 +195,8 @@ VOID FspDebugLogIrp(const char *func, PIRP Irp, NTSTATUS Result);
 #define FSP_LEAVE_DRV(fmt, ...)         \
     FSP_LEAVE_(FSP_DEBUGLOG_(fmt, " = %s", __VA_ARGS__, NtStatusSym(Result))); return Result
 #define FSP_ENTER_MJ(...)               \
+    if (FspFsmupDeviceExtensionKind == FspDeviceExtension(DeviceObject)->Kind)\
+        return FspMupHandleIrp(DeviceObject, Irp);\
     NTSTATUS Result = STATUS_SUCCESS;   \
     PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);\
     BOOLEAN fsp_device_deref = FALSE;   \
@@ -328,11 +345,14 @@ FSP_IOPREP_DISPATCH FspFsvolSetInformationPrepare;
 FSP_IOCMPL_DISPATCH FspFsvolSetInformationComplete;
 FSP_IOCMPL_DISPATCH FspFsvolSetSecurityComplete;
 FSP_IOCMPL_DISPATCH FspFsvolSetVolumeInformationComplete;
-FSP_IOCMPL_DISPATCH FspFsvolShutdownComplete;
 FSP_IOPREP_DISPATCH FspFsvolWritePrepare;
 FSP_IOCMPL_DISPATCH FspFsvolWriteComplete;
 
 /* fast I/O and resource acquisition callbacks */
+FAST_IO_QUERY_BASIC_INFO FspFastIoQueryBasicInfo;
+FAST_IO_QUERY_STANDARD_INFO FspFastIoQueryStandardInfo;
+FAST_IO_QUERY_NETWORK_OPEN_INFO FspFastIoQueryNetworkOpenInfo;
+FAST_IO_QUERY_OPEN FspFastIoQueryOpen;
 FAST_IO_CHECK_IF_POSSIBLE FspFastIoCheckIfPossible;
 FAST_IO_ACQUIRE_FILE FspAcquireFileForNtCreateSection;
 FAST_IO_RELEASE_FILE FspReleaseFileForNtCreateSection;
@@ -443,11 +463,16 @@ enum
 BOOLEAN FspFileNameIsValid(PUNICODE_STRING Path, ULONG MaxComponentLength,
     PUNICODE_STRING StreamPart, PULONG StreamType);
 BOOLEAN FspFileNameIsValidPattern(PUNICODE_STRING Pattern, ULONG MaxComponentLength);
+BOOLEAN FspEaNameIsValid(PSTRING Name);
 VOID FspFileNameSuffix(PUNICODE_STRING Path, PUNICODE_STRING Remain, PUNICODE_STRING Suffix);
 #if 0
 NTSTATUS FspFileNameUpcase(
     PUNICODE_STRING DestinationName,
     PUNICODE_STRING SourceName,
+    PCWCH UpcaseTable);
+VOID FspEaNameUpcase(
+    PSTRING DestinationName,
+    PSTRING SourceName,
     PCWCH UpcaseTable);
 LONG FspFileNameCompare(
     PUNICODE_STRING Name1,
@@ -461,6 +486,7 @@ BOOLEAN FspFileNameIsPrefix(
     PCWCH UpcaseTable);
 #else
 #define FspFileNameUpcase(D,S,U)        (ASSERT(0 == (U)), RtlUpcaseUnicodeString(D,S,FALSE))
+#define FspEaNameUpcase(D,S,U)          (ASSERT(0 == (U)), RtlUpperString(D,S))
 #define FspFileNameCompare(N1,N2,I,U)   (ASSERT(0 == (U)), RtlCompareUnicodeString(N1,N2,I))
 #define FspFileNameIsPrefix(N1,N2,I,U)  (ASSERT(0 == (U)), RtlPrefixUnicodeString(N1,N2,I))
 #endif
@@ -471,14 +497,28 @@ NTSTATUS FspFileNameInExpression(
     PWCH UpcaseTable,
     PBOOLEAN PResult);
 
+/* UUID5 creation (ku) */
+NTSTATUS FspUuid5Make(const UUID *Namespace, const VOID *Buffer, ULONG Size, UUID *Uuid);
+
 /* utility */
 PVOID FspAllocatePoolMustSucceed(POOL_TYPE PoolType, SIZE_T Size, ULONG Tag);
 PVOID FspAllocateIrpMustSucceed(CCHAR StackSize);
 NTSTATUS FspCreateGuid(GUID *Guid);
 NTSTATUS FspGetDeviceObjectPointer(PUNICODE_STRING ObjectName, ACCESS_MASK DesiredAccess,
     PULONG PFileNameIndex, PFILE_OBJECT *PFileObject, PDEVICE_OBJECT *PDeviceObject);
+NTSTATUS FspRegistryGetValue(PUNICODE_STRING Path, PUNICODE_STRING ValueName,
+    PKEY_VALUE_PARTIAL_INFORMATION ValueInformation, PULONG PValueInformationLength);
 NTSTATUS FspSendSetInformationIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
     FILE_INFORMATION_CLASS FileInformationClass, PVOID FileInformation, ULONG Length);
+NTSTATUS FspSendQuerySecurityIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
+    SECURITY_INFORMATION SecurityInformation,
+    PSECURITY_DESCRIPTOR SecurityDescriptor,
+    PULONG PLength);
+NTSTATUS FspSendQueryEaIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
+    PFILE_GET_EA_INFORMATION GetEa, ULONG GetEaLength,
+    PFILE_FULL_EA_INFORMATION Ea, PULONG PEaLength);
+NTSTATUS FspSendMountmgrDeviceControlIrp(ULONG IoControlCode,
+    PVOID SystemBuffer, ULONG InputBufferLength, PULONG POutputBufferLength);
 NTSTATUS FspBufferUserBuffer(PIRP Irp, ULONG Length, LOCK_OPERATION Operation);
 NTSTATUS FspLockUserBuffer(PIRP Irp, ULONG Length, LOCK_OPERATION Operation);
 NTSTATUS FspMapLockedPagesInUserMode(PMDL Mdl, PVOID *PAddress, ULONG ExtraPriorityFlags);
@@ -500,6 +540,14 @@ NTSTATUS FspCcFlushCache(PSECTION_OBJECT_POINTERS SectionObjectPointer,
 NTSTATUS FspQuerySecurityDescriptorInfo(SECURITY_INFORMATION SecurityInformation,
     PSECURITY_DESCRIPTOR SecurityDescriptor, PULONG PLength,
     PSECURITY_DESCRIPTOR ObjectsSecurityDescriptor);
+NTSTATUS FspEaBufferFromOriginatingProcessValidate(
+    PFILE_FULL_EA_INFORMATION Buffer,
+    ULONG Length,
+    PULONG PErrorOffset);
+NTSTATUS FspEaBufferFromFileSystemValidate(
+    PFILE_FULL_EA_INFORMATION Buffer,
+    ULONG Length,
+    PULONG PErrorOffset);
 NTSTATUS FspNotifyInitializeSync(PNOTIFY_SYNC *NotifySync);
 NTSTATUS FspNotifyFullChangeDirectory(
     PNOTIFY_SYNC NotifySync,
@@ -558,6 +606,8 @@ NTSTATUS FspOplockFsctrl(
     FspNotifyFullChangeDirectory(NS, NL, FC, 0, 0, FALSE, 0, 0, 0, 0)
 #define FspNotifyReportChange(NS, NL, FN, FO, NP, F, A)\
     FspNotifyFullReportChange(NS, NL, (PSTRING)(FN), FO, 0, (PSTRING)(NP), F, A, 0)
+#define FSP_NEXT_EA(Ea, EaEnd)          \
+    (0 != (Ea)->NextEntryOffset ? (PVOID)((PUINT8)(Ea) + (Ea)->NextEntryOffset) : (EaEnd))
 
 /* utility: synchronous work queue */
 typedef struct
@@ -837,6 +887,10 @@ PIRP FspIoqNextCompleteIrp(FSP_IOQ *Ioq, PIRP BoundaryIrp);
 ULONG FspIoqRetriedIrpCount(FSP_IOQ *Ioq);
 
 /* meta cache */
+enum
+{
+    FspMetaCacheItemHeaderSize = MEMORY_ALLOCATION_ALIGNMENT,
+};
 typedef struct
 {
     KSPIN_LOCK SpinLock;
@@ -984,6 +1038,8 @@ enum
     FspFsvolDeviceDirInfoCacheItemSizeMax = FSP_FSCTL_ALIGN_UP(16384, PAGE_SIZE),
     FspFsvolDeviceStreamInfoCacheCapacity = 100,
     FspFsvolDeviceStreamInfoCacheItemSizeMax = FSP_FSCTL_ALIGN_UP(16384, PAGE_SIZE),
+    FspFsvolDeviceEaCacheCapacity = 100,
+    FspFsvolDeviceEaCacheItemSizeMax = FSP_FSCTL_ALIGN_UP(16384, PAGE_SIZE),
 };
 typedef struct
 {
@@ -1003,6 +1059,7 @@ typedef struct
 enum
 {
     FspFsctlDeviceExtensionKind = '\0ltC',  /* file system control device (e.g. \Device\WinFsp.Disk) */
+    FspFsmupDeviceExtensionKind = '\0puM',  /* our own MUP device (linked to \Device\WinFsp.Mup) */
     FspFsvrtDeviceExtensionKind = '\0trV',  /* virtual volume device (e.g. \Device\Volume{GUID}) */
     FspFsvolDeviceExtensionKind = '\0loV',  /* file system volume device (unnamed) */
 };
@@ -1015,19 +1072,26 @@ typedef struct
 typedef struct
 {
     FSP_DEVICE_EXTENSION Base;
-    UINT32 InitDoneFsvrt:1, InitDoneIoq:1, InitDoneSec:1, InitDoneDir:1, InitDoneStrm:1,
-        InitDoneCtxTab:1, InitDoneTimer:1, InitDoneInfo:1, InitDoneNotify:1, InitDoneStat:1;
+    UINT32 InitDoneFsvrt:1, InitDoneIoq:1, InitDoneSec:1, InitDoneDir:1, InitDoneStrm:1, InitDoneEa:1,
+        InitDoneCtxTab:1, InitDoneTimer:1, InitDoneInfo:1, InitDoneNotify:1, InitDoneStat:1,
+        InitDoneFsext;
     PDEVICE_OBJECT FsctlDeviceObject;
     PDEVICE_OBJECT FsvrtDeviceObject;
-    HANDLE MupHandle;
+    PDEVICE_OBJECT FsvolDeviceObject;
     PVPB SwapVpb;
     FSP_DELAYED_WORK_ITEM DeleteVolumeDelayedWorkItem;
     FSP_FSCTL_VOLUME_PARAMS VolumeParams;
+    FSP_FSEXT_PROVIDER *Provider;
     UNICODE_STRING VolumePrefix;
+    UNICODE_PREFIX_TABLE_ENTRY VolumePrefixEntry;
+#if defined(FSP_CFG_REJECT_EARLY_IRP)
+    LONG ReadyToAcceptIrp;
+#endif
     FSP_IOQ *Ioq;
     FSP_META_CACHE *SecurityCache;
     FSP_META_CACHE *DirInfoCache;
     FSP_META_CACHE *StreamInfoCache;
+    FSP_META_CACHE *EaCache;
     KSPIN_LOCK ExpirationLock;
     WORK_QUEUE_ITEM ExpirationWorkItem;
     BOOLEAN ExpirationInProgress;
@@ -1044,7 +1108,26 @@ typedef struct
     PNOTIFY_SYNC NotifySync;
     LIST_ENTRY NotifyList;
     FSP_STATISTICS *Statistics;
+    FSP_FSCTL_DECLSPEC_ALIGN UINT8 FsextData[];
 } FSP_FSVOL_DEVICE_EXTENSION;
+typedef struct
+{
+    FSP_DEVICE_EXTENSION Base;
+    UINT16 SectorSize;
+    LONG IsMountdev;
+    BOOLEAN Persistent;
+    GUID UniqueId;
+    UNICODE_STRING VolumeName;
+    WCHAR VolumeNameBuf[FSP_FSCTL_VOLUME_NAME_SIZE / sizeof(WCHAR)];
+} FSP_FSVRT_DEVICE_EXTENSION;
+typedef struct
+{
+    FSP_DEVICE_EXTENSION Base;
+    UINT32 InitDonePfxTab:1;
+    ERESOURCE PrefixTableResource;
+    UNICODE_PREFIX_TABLE PrefixTable;
+    UNICODE_PREFIX_TABLE ClassTable;
+} FSP_FSMUP_DEVICE_EXTENSION;
 static inline
 FSP_DEVICE_EXTENSION *FspDeviceExtension(PDEVICE_OBJECT DeviceObject)
 {
@@ -1054,6 +1137,18 @@ static inline
 FSP_FSVOL_DEVICE_EXTENSION *FspFsvolDeviceExtension(PDEVICE_OBJECT DeviceObject)
 {
     ASSERT(FspFsvolDeviceExtensionKind == ((FSP_DEVICE_EXTENSION *)DeviceObject->DeviceExtension)->Kind);
+    return DeviceObject->DeviceExtension;
+}
+static inline
+FSP_FSVRT_DEVICE_EXTENSION *FspFsvrtDeviceExtension(PDEVICE_OBJECT DeviceObject)
+{
+    ASSERT(FspFsvrtDeviceExtensionKind == ((FSP_DEVICE_EXTENSION *)DeviceObject->DeviceExtension)->Kind);
+    return DeviceObject->DeviceExtension;
+}
+static inline
+FSP_FSMUP_DEVICE_EXTENSION *FspFsmupDeviceExtension(PDEVICE_OBJECT DeviceObject)
+{
+    ASSERT(FspFsmupDeviceExtensionKind == ((FSP_DEVICE_EXTENSION *)DeviceObject->DeviceExtension)->Kind);
     return DeviceObject->DeviceExtension;
 }
 NTSTATUS FspDeviceCreateSecure(UINT32 Kind, ULONG ExtraSize,
@@ -1091,6 +1186,24 @@ VOID FspFsvolDeviceGetVolumeInfo(PDEVICE_OBJECT DeviceObject, FSP_FSCTL_VOLUME_I
 BOOLEAN FspFsvolDeviceTryGetVolumeInfo(PDEVICE_OBJECT DeviceObject, FSP_FSCTL_VOLUME_INFO *VolumeInfo);
 VOID FspFsvolDeviceSetVolumeInfo(PDEVICE_OBJECT DeviceObject, const FSP_FSCTL_VOLUME_INFO *VolumeInfo);
 VOID FspFsvolDeviceInvalidateVolumeInfo(PDEVICE_OBJECT DeviceObject);
+#if defined(FSP_CFG_REJECT_EARLY_IRP)
+static inline
+BOOLEAN FspFsvolDeviceReadyToAcceptIrp(PDEVICE_OBJECT DeviceObject)
+{
+    FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension = FspFsvolDeviceExtension(DeviceObject);
+    if (!FsvolDeviceExtension->VolumeParams.RejectIrpPriorToTransact0)
+        return TRUE;
+    return 0 != InterlockedCompareExchange(&FsvolDeviceExtension->ReadyToAcceptIrp, 0, 0);
+}
+static inline
+VOID FspFsvolDeviceSetReadyToAcceptIrp(PDEVICE_OBJECT DeviceObject)
+{
+    FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension = FspFsvolDeviceExtension(DeviceObject);
+    if (!FsvolDeviceExtension->VolumeParams.RejectIrpPriorToTransact0)
+        return;
+    InterlockedExchange(&FsvolDeviceExtension->ReadyToAcceptIrp, 1);
+}
+#endif
 static inline
 BOOLEAN FspFsvolDeviceVolumePrefixInString(PDEVICE_OBJECT DeviceObject, PUNICODE_STRING String)
 {
@@ -1121,6 +1234,9 @@ VOID FspDeviceGlobalUnlock(VOID)
     //(FILE_DEVICE_DISK_FILE_SYSTEM == (DeviceObject)->DeviceType ?\
     //    STATUS_VOLUME_DISMOUNTED : STATUS_DEVICE_NOT_CONNECTED)
 
+/* fsext */
+FSP_FSEXT_PROVIDER *FspFsextProvider(UINT32 FsextControlCode, PNTSTATUS PLoadResult);
+
 /* process buffers conditional usage */
 static inline
 BOOLEAN FspReadIrpShouldUseProcessBuffer(PIRP Irp, SIZE_T BufferSize)
@@ -1144,27 +1260,52 @@ BOOLEAN FspWriteIrpShouldUseProcessBuffer(PIRP Irp, SIZE_T BufferSize)
     return FspProcessBufferSizeMax >= BufferSize;
 #endif
 }
+#if 0
 static inline
 BOOLEAN FspQueryDirectoryIrpShouldUseProcessBuffer(PIRP Irp, SIZE_T BufferSize)
 {
     return FspReadIrpShouldUseProcessBuffer(Irp, BufferSize);
 }
+#endif
+
+/* mountdev */
+NTSTATUS FspMountdevQueryDeviceName(
+    PDEVICE_OBJECT FsvrtDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
+NTSTATUS FspMountdevQueryUniqueId(
+    PDEVICE_OBJECT FsvrtDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
+BOOLEAN FspMountdevDeviceControl(
+    PDEVICE_OBJECT FsvrtDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp,
+    PNTSTATUS PResult);
+NTSTATUS FspMountdevMake(
+    PDEVICE_OBJECT FsvrtDeviceObject, PDEVICE_OBJECT FsvolDeviceObject,
+    BOOLEAN Persistent);
+VOID FspMountdevFini(
+    PDEVICE_OBJECT FsvrtDeviceObject);
+
+/* fsmup */
+NTSTATUS FspMupRegister(
+    PDEVICE_OBJECT FsmupDeviceObject, PDEVICE_OBJECT FsvolDeviceObject);
+VOID FspMupUnregister(
+    PDEVICE_OBJECT FsmupDeviceObject, PDEVICE_OBJECT FsvolDeviceObject);
+NTSTATUS FspMupHandleIrp(
+    PDEVICE_OBJECT FsmupDeviceObject, PIRP Irp);
 
 /* volume management */
-#define FspVolumeTransactEarlyTimeout   (1 * 10000ULL)
 NTSTATUS FspVolumeCreate(
     PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
 VOID FspVolumeDelete(
     PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
 NTSTATUS FspVolumeMount(
     PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
-NTSTATUS FspVolumeRedirQueryPathEx(
-    PDEVICE_OBJECT FsvolDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
+NTSTATUS FspVolumeMakeMountdev(
+    PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
 NTSTATUS FspVolumeGetName(
     PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
 NTSTATUS FspVolumeGetNameList(
     PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
 NTSTATUS FspVolumeTransact(
+    PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
+NTSTATUS FspVolumeTransactFsext(
     PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
 NTSTATUS FspVolumeStop(
     PDEVICE_OBJECT FsctlDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
@@ -1229,11 +1370,15 @@ typedef struct FSP_FILE_NODE
     UINT64 LastAccessTime;
     UINT64 LastWriteTime;
     UINT64 ChangeTime;
+    UINT32 EaSize;
     ULONG FileInfoChangeNumber;
     UINT64 Security;
     ULONG SecurityChangeNumber;
     ULONG DirInfoChangeNumber;
     ULONG StreamInfoChangeNumber;
+    UINT64 Ea;
+    ULONG EaChangeNumber;
+    ULONG EaChangeCount;
     BOOLEAN TruncateOnClose;
     FILE_LOCK FileLock;
 #if (NTDDI_VERSION < NTDDI_WIN8)
@@ -1272,6 +1417,8 @@ typedef struct
     UNICODE_STRING DirectoryMarker;
     UINT64 DirInfo;
     ULONG DirInfoCacheHint;
+    ULONG EaIndex;
+    ULONG EaChangeCount;
     /* stream support */
     HANDLE MainFileHandle;
     PFILE_OBJECT MainFileObject;
@@ -1329,6 +1476,7 @@ NTSTATUS FspFileNodeOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject,
     UINT32 GrantedAccess, UINT32 ShareAccess,
     FSP_FILE_NODE **POpenedFileNode, PULONG PSharingViolationReason);
 VOID FspFileNodeCleanup(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject, PULONG PCleanupFlags);
+VOID FspFileNodeCleanupFlush(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject);
 VOID FspFileNodeCleanupComplete(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject);
 VOID FspFileNodeClose(FSP_FILE_NODE *FileNode,
     PFILE_OBJECT FileObject,    /* non-0 to remove share access */
@@ -1348,10 +1496,14 @@ NTSTATUS FspFileNodeRenameCheck(PDEVICE_OBJECT FsvolDeviceObject, PIRP OplockIrp
 VOID FspFileNodeRename(FSP_FILE_NODE *FileNode, PUNICODE_STRING NewFileName);
 VOID FspFileNodeGetFileInfo(FSP_FILE_NODE *FileNode, FSP_FSCTL_FILE_INFO *FileInfo);
 BOOLEAN FspFileNodeTryGetFileInfo(FSP_FILE_NODE *FileNode, FSP_FSCTL_FILE_INFO *FileInfo);
+BOOLEAN FspFileNodeTryGetFileInfoByName(PDEVICE_OBJECT FsvolDeviceObject, PIRP Irp,
+    PUNICODE_STRING FileName, FSP_FSCTL_FILE_INFO *FileInfo);
 VOID FspFileNodeSetFileInfo(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
     const FSP_FSCTL_FILE_INFO *FileInfo, BOOLEAN TruncateOnClose);
-BOOLEAN FspFileNodeTrySetFileInfoOnOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
-    const FSP_FSCTL_FILE_INFO *FileInfo, BOOLEAN TruncateOnClose);
+BOOLEAN FspFileNodeTrySetFileInfoAndSecurityOnOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
+    const FSP_FSCTL_FILE_INFO *FileInfo,
+    const PSECURITY_DESCRIPTOR SecurityDescriptor, ULONG SecurityDescriptorSize,
+    BOOLEAN TruncateOnClose);
 BOOLEAN FspFileNodeTrySetFileInfo(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
     const FSP_FSCTL_FILE_INFO *FileInfo, ULONG InfoChangeNumber);
 VOID FspFileNodeInvalidateFileInfo(FSP_FILE_NODE *FileNode);
@@ -1397,6 +1549,17 @@ ULONG FspFileNodeStreamInfoChangeNumber(FSP_FILE_NODE *FileNode)
     return FileNode->StreamInfoChangeNumber;
 }
 VOID FspFileNodeInvalidateStreamInfo(FSP_FILE_NODE *FileNode);
+BOOLEAN FspFileNodeReferenceEa(FSP_FILE_NODE *FileNode, PCVOID *PBuffer, PULONG PSize);
+VOID FspFileNodeSetEa(FSP_FILE_NODE *FileNode, PCVOID Buffer, ULONG Size);
+BOOLEAN FspFileNodeTrySetEa(FSP_FILE_NODE *FileNode, PCVOID Buffer, ULONG Size,
+    ULONG EaChangeNumber);
+static inline
+ULONG FspFileNodeEaChangeNumber(FSP_FILE_NODE *FileNode)
+{
+    if (0 != FileNode->MainFileNode)
+        FileNode = FileNode->MainFileNode;
+    return FileNode->EaChangeNumber;
+}
 VOID FspFileNodeNotifyChange(FSP_FILE_NODE *FileNode, ULONG Filter, ULONG Action,
     BOOLEAN InvalidateCaches);
 NTSTATUS FspFileNodeProcessLockIrp(FSP_FILE_NODE *FileNode, PIRP Irp);
@@ -1418,28 +1581,6 @@ NTSTATUS FspMainFileOpen(
 NTSTATUS FspMainFileClose(
     HANDLE MainFileHandle,
     PFILE_OBJECT MainFileObject);
-static __forceinline
-BOOLEAN FspMainFileOpenCheck(PIRP Irp)
-{
-    extern const GUID FspMainFileOpenEcpGuid;
-    NTSTATUS Result;
-    PECP_LIST ExtraCreateParameters = 0;
-    PVOID ExtraCreateParameter = 0;
-
-    Result = FsRtlGetEcpListFromIrp(Irp, &ExtraCreateParameters);
-    if (!NT_SUCCESS(Result) || 0 == ExtraCreateParameters)
-        return FALSE;
-
-    Result = FsRtlFindExtraCreateParameter(ExtraCreateParameters,
-        &FspMainFileOpenEcpGuid, &ExtraCreateParameter, 0);
-    if (!NT_SUCCESS(Result) || 0 == ExtraCreateParameter)
-        return FALSE;
-
-    if (FsRtlIsEcpFromUserMode(ExtraCreateParameter))
-        return FALSE;
-
-    return TRUE;
-}
 #define FspFileNodeAcquireShared(N,F)   FspFileNodeAcquireSharedF(N, FspFileNodeAcquire ## F)
 #define FspFileNodeTryAcquireShared(N,F)    FspFileNodeTryAcquireSharedF(N, FspFileNodeAcquire ## F, FALSE)
 #define FspFileNodeAcquireExclusive(N,F)    FspFileNodeAcquireExclusiveF(N, FspFileNodeAcquire ## F)
@@ -1451,6 +1592,7 @@ BOOLEAN FspMainFileOpenCheck(PIRP Irp)
 #define FspFileNodeDereferenceSecurity(P)   FspMetaCacheDereferenceItemBuffer(P)
 #define FspFileNodeDereferenceDirInfo(P)    FspMetaCacheDereferenceItemBuffer(P)
 #define FspFileNodeDereferenceStreamInfo(P) FspMetaCacheDereferenceItemBuffer(P)
+#define FspFileNodeDereferenceEa(P)         FspMetaCacheDereferenceItemBuffer(P)
 #define FspFileNodeUnlockAll(N,F,P)     FsRtlFastUnlockAll(&(N)->FileLock, F, P, N)
 #if (NTDDI_VERSION < NTDDI_WIN8)
 #define FspFileNodeAddrOfOplock(N)      (&(N)->Oplock)
@@ -1514,7 +1656,7 @@ NTSTATUS FspFileNodeOplockCheckAsyncEx(
         CompletionRoutine,
         PostIrpRoutine);
 #if DBG
-    if (STATUS_SUCCESS == Result && DEBUGTEST(10))
+    if (DEBUGTEST_EX(STATUS_SUCCESS == Result, 10, FALSE))
     {
         Irp->IoStatus.Status = STATUS_SUCCESS;
         Irp->IoStatus.Information = 0;
@@ -1553,6 +1695,8 @@ FSP_MV_CcCoherencyFlushAndPurgeCache(
 extern PDRIVER_OBJECT FspDriverObject;
 extern PDEVICE_OBJECT FspFsctlDiskDeviceObject;
 extern PDEVICE_OBJECT FspFsctlNetDeviceObject;
+extern PDEVICE_OBJECT FspFsmupDeviceObject;
+extern HANDLE FspMupHandle;
 extern FAST_IO_DISPATCH FspFastIoDispatch;
 extern CACHE_MANAGER_CALLBACKS FspCacheManagerCallbacks;
 extern FSP_IOPREP_DISPATCH *FspIopPrepareFunction[];
@@ -1563,6 +1707,7 @@ extern const GUID FspMainFileOpenEcpGuid;
 extern ULONG FspProcessorCount;
 extern FSP_MV_CcCoherencyFlushAndPurgeCache *FspMvCcCoherencyFlushAndPurgeCache;
 extern ULONG FspMvMdlMappingNoWrite;
+extern BOOLEAN FspHasReparsePointCaseSensitivityFix;
 
 /*
  * Fixes
@@ -1575,5 +1720,75 @@ LOGICAL RtlEqualMemory(const VOID *Source1, const VOID *Source2, SIZE_T Length)
 {
     return Length == RtlCompareMemory(Source1, Source2, Length);
 }
+
+/* FILE_STAT_INFORMATION and FILE_STAT_LX_INFORMATION are missings on some WDK's. */
+typedef struct
+{
+    LARGE_INTEGER FileId;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER AllocationSize;
+    LARGE_INTEGER EndOfFile;
+    ULONG FileAttributes;
+    ULONG ReparseTag;
+    ULONG NumberOfLinks;
+    ACCESS_MASK EffectiveAccess;
+} FSP_FILE_STAT_INFORMATION, *PFSP_FILE_STAT_INFORMATION;
+typedef struct
+{
+    LARGE_INTEGER FileId;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER AllocationSize;
+    LARGE_INTEGER EndOfFile;
+    ULONG FileAttributes;
+    ULONG ReparseTag;
+    ULONG NumberOfLinks;
+    ACCESS_MASK EffectiveAccess;
+    ULONG LxFlags;
+    ULONG LxUid;
+    ULONG LxGid;
+    ULONG LxMode;
+    ULONG LxDeviceIdMajor;
+    ULONG LxDeviceIdMinor;
+} FSP_FILE_STAT_LX_INFORMATION, *PFSP_FILE_STAT_LX_INFORMATION;
+
+/* ATOMIC_CREATE_ECP_CONTEXT is missing on some WDK's */
+#define ATOMIC_CREATE_ECP_IN_FLAG_REPARSE_POINT_SPECIFIED   0x0002
+#define ATOMIC_CREATE_ECP_OUT_FLAG_REPARSE_POINT_SET        0x0002
+#define ATOMIC_CREATE_ECP_IN_FLAG_BEST_EFFORT               0x0100
+typedef struct
+{
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+} FSP_FILE_TIMESTAMPS, *PFSP_FILE_TIMESTAMPS;
+typedef struct
+{
+    USHORT Size;
+    USHORT InFlags;
+    USHORT OutFlags;
+    USHORT ReparseBufferLength;
+    PREPARSE_DATA_BUFFER ReparseBuffer;
+    LONGLONG FileSize;
+    LONGLONG ValidDataLength;
+    PFSP_FILE_TIMESTAMPS FileTimestamps;
+    ULONG FileAttributes;
+    ULONG UsnSourceInfo;
+    USN Usn;
+    ULONG SuppressFileAttributeInheritanceMask;
+    ULONG InOpFlags;
+    ULONG OutOpFlags;
+    ULONG InGenFlags;
+    ULONG OutGenFlags;
+    ULONG CaseSensitiveFlagsMask;
+    ULONG InCaseSensitiveFlags;
+    ULONG OutCaseSensitiveFlags;
+} FSP_ATOMIC_CREATE_ECP_CONTEXT, *PFSP_ATOMIC_CREATE_ECP_CONTEXT;
 
 #endif

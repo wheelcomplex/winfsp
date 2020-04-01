@@ -1,7 +1,7 @@
 /**
  * @file winfsp-tests.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <windows.h>
@@ -33,6 +37,7 @@ BOOLEAN OptResilient = FALSE;
 BOOLEAN OptCaseInsensitiveCmp = FALSE;
 BOOLEAN OptCaseInsensitive = FALSE;
 BOOLEAN OptCaseRandomize = FALSE;
+BOOLEAN OptFlushAndPurgeOnCleanup = FALSE;
 WCHAR OptOplock = 0;
 WCHAR OptMountPointBuf[MAX_PATH], *OptMountPoint;
 WCHAR OptShareNameBuf[MAX_PATH], *OptShareName, *OptShareTarget;
@@ -181,11 +186,15 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
 int main(int argc, char *argv[])
 {
     TESTSUITE(fuse_opt_tests);
+    TESTSUITE(fuse_tests);
     TESTSUITE(posix_tests);
+    TESTSUITE(uuid5_tests);
     TESTSUITE(eventlog_tests);
     TESTSUITE(path_tests);
     TESTSUITE(dirbuf_tests);
     TESTSUITE(version_tests);
+    TESTSUITE(launch_tests);
+    TESTSUITE(launcher_ptrans_tests);
     TESTSUITE(mount_tests);
     TESTSUITE(timeout_tests);
     TESTSUITE(memfs_tests);
@@ -197,9 +206,13 @@ int main(int argc, char *argv[])
     TESTSUITE(lock_tests);
     TESTSUITE(dirctl_tests);
     TESTSUITE(exec_tests);
+    TESTSUITE(devctl_tests);
     TESTSUITE(reparse_tests);
+    TESTSUITE(ea_tests);
     TESTSUITE(stream_tests);
     TESTSUITE(oplock_tests);
+    TESTSUITE(wsl_tests);
+    TESTSUITE(volpath_tests);
 
     atexit(exiting);
     signal(SIGABRT, abort_handler);
@@ -238,6 +251,11 @@ int main(int argc, char *argv[])
                 OptCaseRandomize = TRUE;
                 OptCaseInsensitive = TRUE;
                 OptCaseInsensitiveCmp = TRUE;
+                rmarg(argv, argc, argi);
+            }
+            else if (0 == strcmp("--flush-and-purge-on-cleanup", a))
+            {
+                OptFlushAndPurgeOnCleanup = TRUE;
                 rmarg(argv, argc, argi);
             }
             else if (0 == strcmp("--oplock=batch", a))

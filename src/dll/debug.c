@@ -1,7 +1,7 @@
 /**
  * @file dll/debug.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <dll/library.h>
@@ -61,6 +65,21 @@ FSP_API VOID FspDebugLogSD(const char *format, PSECURITY_DESCRIPTOR SecurityDesc
     }
     else
         FspDebugLog(format, "invalid security descriptor");
+}
+
+FSP_API VOID FspDebugLogSid(const char *format, PSID Sid)
+{
+    char *S;
+
+    if (0 == Sid)
+        FspDebugLog(format, "null SID");
+    else if (ConvertSidToStringSidA(Sid, &S))
+    {
+        FspDebugLog(format, S);
+        LocalFree(S);
+    }
+    else
+        FspDebugLog(format, "invalid SID");
 }
 
 FSP_API VOID FspDebugLogFT(const char *format, PFILETIME FileTime)

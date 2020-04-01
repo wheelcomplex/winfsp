@@ -1,7 +1,7 @@
 /**
  * @file sys/write.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -213,6 +217,13 @@ static NTSTATUS FspFsvolWriteCached(
             FspFileNodeRelease(FileNode, Main);
             return STATUS_INSUFFICIENT_RESOURCES; // or STATUS_SECTION_TOO_BIG?
         }
+    }
+
+    /* double-check that the end offset is <= than the file size and fail if not */
+    if (WriteEndOffset > (UINT64)CcGetFileSizePointer(FileObject)->QuadPart)
+    {
+        FspFileNodeRelease(FileNode, Main);
+        return STATUS_INTERNAL_ERROR;
     }
 
     /*

@@ -1,7 +1,7 @@
 /**
  * @file memfs-main.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <winfsp/winfsp.h>
@@ -39,11 +43,14 @@ NTSTATUS SvcStart(FSP_SERVICE *Service, ULONG argc, PWSTR *argv)
     wchar_t **argp, **arge;
     ULONG DebugFlags = 0;
     PWSTR DebugLogFile = 0;
-    ULONG CaseInsensitiveFlags = 0;
     ULONG Flags = MemfsDisk;
+    ULONG OtherFlags = 0;
     ULONG FileInfoTimeout = INFINITE;
     ULONG MaxFileNodes = 1024;
     ULONG MaxFileSize = 16 * 1024 * 1024;
+    ULONG SlowioMaxDelay = 0;       /* -M: maximum slow IO delay in millis */
+    ULONG SlowioPercentDelay = 0;   /* -P: percent of slow IO to make pending */
+    ULONG SlowioRarefyDelay = 0;    /* -R: adjust the rarity of pending slow IO */
     PWSTR FileSystemName = 0;
     PWSTR MountPoint = 0;
     PWSTR VolumePrefix = 0;
@@ -66,17 +73,29 @@ NTSTATUS SvcStart(FSP_SERVICE *Service, ULONG argc, PWSTR *argv)
         case L'D':
             argtos(DebugLogFile);
             break;
+        case L'f':
+            OtherFlags = MemfsFlushAndPurgeOnCleanup;
+            break;
         case L'F':
             argtos(FileSystemName);
             break;
         case L'i':
-            CaseInsensitiveFlags = MemfsCaseInsensitive;
+            OtherFlags = MemfsCaseInsensitive;
             break;
         case L'm':
             argtos(MountPoint);
             break;
+        case L'M':
+            argtol(SlowioMaxDelay);
+            break;
         case L'n':
             argtol(MaxFileNodes);
+            break;
+        case L'P':
+            argtol(SlowioPercentDelay);
+            break;
+        case L'R':
+            argtol(SlowioRarefyDelay);
             break;
         case L'S':
             argtos(RootSddl);
@@ -126,10 +145,13 @@ NTSTATUS SvcStart(FSP_SERVICE *Service, ULONG argc, PWSTR *argv)
     }
 
     Result = MemfsCreateFunnel(
-        CaseInsensitiveFlags | Flags,
+        Flags | OtherFlags,
         FileInfoTimeout,
         MaxFileNodes,
         MaxFileSize,
+        SlowioMaxDelay,
+        SlowioPercentDelay,
+        SlowioRarefyDelay,
         FileSystemName,
         VolumePrefix,
         RootSddl,
@@ -186,9 +208,13 @@ usage:
         "    -d DebugFlags       [-1: enable all debug logs]\n"
         "    -D DebugLogFile     [file path; use - for stderr]\n"
         "    -i                  [case insensitive file system]\n"
+        "    -f                  [flush and purge cache on cleanup]\n"
         "    -t FileInfoTimeout  [millis]\n"
         "    -n MaxFileNodes\n"
         "    -s MaxFileSize      [bytes]\n"
+        "    -M MaxDelay         [maximum slow IO delay in millis]\n"
+        "    -P PercentDelay     [percent of slow IO to make pending]\n"
+        "    -R RarefyDelay      [adjust the rarity of pending slow IO]\n"
         "    -F FileSystemName\n"
         "    -S RootSddl         [file rights: FA, etc; NO generic rights: GA, etc.]\n"
         "    -u \\Server\\Share    [UNC prefix (single backslash)]\n"

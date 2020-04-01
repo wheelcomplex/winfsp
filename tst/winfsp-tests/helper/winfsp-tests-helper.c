@@ -1,7 +1,7 @@
 /**
  * @file winfsp-tests-helper.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <windows.h>
@@ -74,17 +78,17 @@ static long long wcstoint(const wchar_t *p, int base, int is_signed)
 
 int wmain(int argc, wchar_t **argv)
 {
-	HANDLE Event;
-	ULONG Timeout;
+    HANDLE Event;
+    ULONG Timeout;
 
-	if (argc != 3)
-		return 1;
+    if (argc != 3)
+        return 1;
 
-	Event = (HANDLE)(UINT_PTR)wcstoint(argv[1], 16, 0);
-	Timeout = wcstoint(argv[2], 16, 0);
+    Event = (HANDLE)(UINT_PTR)wcstoint(argv[1], 16, 0);
+    Timeout = wcstoint(argv[2], 16, 0);
 
-	SetEvent(Event);
-	CloseHandle(Event);
+    SetEvent(Event);
+    CloseHandle(Event);
 
     Sleep(Timeout);
 

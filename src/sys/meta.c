@@ -1,7 +1,7 @@
 /**
  * @file sys/meta.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -33,6 +37,8 @@ typedef struct
     ULONG Size;
     __declspec(align(MEMORY_ALLOCATION_ALIGNMENT)) UINT8 Buffer[];
 } FSP_META_CACHE_ITEM_BUFFER;
+FSP_FSCTL_STATIC_ASSERT(FIELD_OFFSET(FSP_META_CACHE_ITEM_BUFFER, Buffer) == FspMetaCacheItemHeaderSize,
+    "FspMetaCacheItemHeaderSize must match offset of FSP_META_CACHE_ITEM_BUFFER::Buffer");
 
 static inline VOID FspMetaCacheDereferenceItem(FSP_META_CACHE_ITEM *Item)
 {
@@ -97,7 +103,7 @@ static inline FSP_META_CACHE_ITEM *FspMetaCacheRemoveExpiredItemAtDpcLevel(FSP_M
     if (Head == Entry)
         return 0;
     FSP_META_CACHE_ITEM *Item = CONTAINING_RECORD(Entry, FSP_META_CACHE_ITEM, ListEntry);
-    if (!FspExpirationTimeValid2(Item->ExpirationTime, ExpirationTime))
+    if (FspExpirationTimeValid2(Item->ExpirationTime, ExpirationTime))
         return 0;
     ULONG HashIndex = Item->ItemIndex % MetaCache->ItemBucketCount;
     for (FSP_META_CACHE_ITEM **P = (PVOID)&MetaCache->ItemBuckets[HashIndex]; *P; P = &(*P)->DictNext)
@@ -196,7 +202,7 @@ UINT64 FspMetaCacheAddItem(FSP_META_CACHE *MetaCache, PCVOID Buffer, ULONG Size)
 {
     if (0 == MetaCache)
         return 0;
-    FSP_META_CACHE_ITEM *Item;
+    FSP_META_CACHE_ITEM *Item, *ExpiredItem = 0;
     FSP_META_CACHE_ITEM_BUFFER *ItemBuffer;
     UINT64 ItemIndex = 0;
     KIRQL Irql;
@@ -218,15 +224,26 @@ UINT64 FspMetaCacheAddItem(FSP_META_CACHE *MetaCache, PCVOID Buffer, ULONG Size)
     Item->RefCount = 1;
     ItemBuffer->Item = Item;
     ItemBuffer->Size = Size;
-    RtlCopyMemory(ItemBuffer->Buffer, Buffer, Size);
+    try
+    {
+        RtlCopyMemory(ItemBuffer->Buffer, Buffer, Size);
+    }
+    except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        FspFree(ItemBuffer);
+        FspFree(Item);
+        return 0;
+    }
     KeAcquireSpinLock(&MetaCache->SpinLock, &Irql);
     if (MetaCache->ItemCount >= MetaCache->MetaCapacity)
-        FspMetaCacheRemoveExpiredItemAtDpcLevel(MetaCache, (UINT64)-1LL);
+        ExpiredItem = FspMetaCacheRemoveExpiredItemAtDpcLevel(MetaCache, (UINT64)-1LL);
     ItemIndex = MetaCache->ItemIndex;
     ItemIndex = (UINT64)-1LL == ItemIndex ? 1 : ItemIndex + 1;
     MetaCache->ItemIndex = Item->ItemIndex = ItemIndex;
     FspMetaCacheAddItemAtDpcLevel(MetaCache, Item);
     KeReleaseSpinLock(&MetaCache->SpinLock, Irql);
+    if (0 != ExpiredItem)
+        FspMetaCacheDereferenceItem(ExpiredItem);
     return ItemIndex;
 }
 

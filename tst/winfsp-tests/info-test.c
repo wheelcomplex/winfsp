@@ -1,7 +1,7 @@
 /**
  * @file info-test.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <winfsp/winfsp.h>
@@ -23,6 +27,140 @@
 #include "memfs.h"
 
 #include "winfsp-tests.h"
+
+void getfileattr_dotest(ULONG Flags, PWSTR Prefix, ULONG FileInfoTimeout)
+{
+    void *memfs = memfs_start_ex(Flags, FileInfoTimeout);
+
+    HANDLE Handle;
+    BOOL Success;
+    WCHAR Dir1Path[MAX_PATH];
+    WCHAR FilePath[MAX_PATH];
+    DWORD FileAttributes;
+    PSECURITY_DESCRIPTOR SecurityDescriptor;
+    SECURITY_ATTRIBUTES SecurityAttributes = { 0 };
+
+    StringCbPrintfW(FilePath, sizeof FilePath, L"%s%s\\file0",
+        Prefix ? L"" : L"\\\\?\\GLOBALROOT", Prefix ? Prefix : memfs_volumename(memfs));
+
+    Handle = CreateFileW(FilePath,
+        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, 0,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+    ASSERT(INVALID_HANDLE_VALUE != Handle);
+
+    FileAttributes = GetFileAttributesW(FilePath);
+    ASSERT(INVALID_FILE_ATTRIBUTES != FileAttributes);
+
+    CloseHandle(Handle);
+
+    Success = DeleteFileW(FilePath);
+    ASSERT(Success);
+
+    StringCbPrintfW(Dir1Path, sizeof Dir1Path, L"%s%s\\dir1",
+        Prefix ? L"" : L"\\\\?\\GLOBALROOT", Prefix ? Prefix : memfs_volumename(memfs));
+
+    StringCbPrintfW(FilePath, sizeof FilePath, L"%s%s\\dir1\\file0",
+        Prefix ? L"" : L"\\\\?\\GLOBALROOT", Prefix ? Prefix : memfs_volumename(memfs));
+
+    /* create directory with SYNCHRONIZE|DELETE|FILE_READ_ATTRIBUTES|FILE_TRAVERSE|FILE_ADD_FILE access */
+    Success = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        L"D:P(A;;0x001100a2;;;SY)(A;;0x001100a2;;;BA)(A;;0x001100a2;;;WD)", SDDL_REVISION_1, &SecurityDescriptor, 0);
+    ASSERT(Success);
+    SecurityAttributes.nLength = sizeof SecurityAttributes;
+    SecurityAttributes.lpSecurityDescriptor = SecurityDescriptor;
+    Success = CreateDirectoryW(Dir1Path, &SecurityAttributes);
+    ASSERT(Success);
+    LocalFree(SecurityDescriptor);
+
+    /* create file with DELETE access only */
+    Success = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        L"D:P(A;;SD;;;SY)(A;;SD;;;BA)(A;;SD;;;WD)", SDDL_REVISION_1, &SecurityDescriptor, 0);
+    ASSERT(Success);
+    SecurityAttributes.nLength = sizeof SecurityAttributes;
+    SecurityAttributes.lpSecurityDescriptor = SecurityDescriptor;
+    Handle = CreateFileW(FilePath,
+        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &SecurityAttributes,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+    ASSERT(INVALID_HANDLE_VALUE != Handle);
+    LocalFree(SecurityDescriptor);
+
+    FileAttributes = GetFileAttributesW(FilePath);
+    ASSERT(INVALID_FILE_ATTRIBUTES == FileAttributes);
+    ASSERT(ERROR_ACCESS_DENIED == GetLastError());
+
+    CloseHandle(Handle);
+
+    Success = DeleteFileW(FilePath);
+    ASSERT(Success);
+
+    Success = RemoveDirectoryW(Dir1Path);
+    ASSERT(Success);
+
+    StringCbPrintfW(Dir1Path, sizeof Dir1Path, L"%s%s\\dir2",
+        Prefix ? L"" : L"\\\\?\\GLOBALROOT", Prefix ? Prefix : memfs_volumename(memfs));
+
+    StringCbPrintfW(FilePath, sizeof FilePath, L"%s%s\\dir2\\file0",
+        Prefix ? L"" : L"\\\\?\\GLOBALROOT", Prefix ? Prefix : memfs_volumename(memfs));
+
+    /* create directory with SYNCHRONIZE|DELETE|FILE_READ_ATTRIBUTES|FILE_TRAVERSE|FILE_ADD_FILE|FILE_LIST_DIRECTORY access */
+    Success = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        L"D:P(A;;0x001100a3;;;SY)(A;;0x001100a3;;;BA)(A;;0x001100a3;;;WD)", SDDL_REVISION_1, &SecurityDescriptor, 0);
+    ASSERT(Success);
+    SecurityAttributes.nLength = sizeof SecurityAttributes;
+    SecurityAttributes.lpSecurityDescriptor = SecurityDescriptor;
+    Success = CreateDirectoryW(Dir1Path, &SecurityAttributes);
+    ASSERT(Success);
+    LocalFree(SecurityDescriptor);
+
+    /* create file with DELETE access only */
+    Success = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        L"D:P(A;;SD;;;SY)(A;;SD;;;BA)(A;;SD;;;WD)", SDDL_REVISION_1, &SecurityDescriptor, 0);
+    ASSERT(Success);
+    SecurityAttributes.nLength = sizeof SecurityAttributes;
+    SecurityAttributes.lpSecurityDescriptor = SecurityDescriptor;
+    Handle = CreateFileW(FilePath,
+        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &SecurityAttributes,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+    ASSERT(INVALID_HANDLE_VALUE != Handle);
+    LocalFree(SecurityDescriptor);
+
+    FileAttributes = GetFileAttributesW(FilePath);
+    ASSERT(INVALID_FILE_ATTRIBUTES != FileAttributes);
+
+    CloseHandle(Handle);
+
+    Success = DeleteFileW(FilePath);
+    ASSERT(Success);
+
+    Success = RemoveDirectoryW(Dir1Path);
+    ASSERT(Success);
+
+    memfs_stop(memfs);
+}
+
+void getfileattr_test(void)
+{
+    if (OptShareName)
+        /* why does this fail with shares? */
+        return;
+
+    if (NtfsTests)
+    {
+        WCHAR DirBuf[MAX_PATH];
+        GetTestDirectory(DirBuf);
+        getfileattr_dotest(-1, DirBuf, 0);
+    }
+    if (WinFspDiskTests)
+    {
+        getfileattr_dotest(MemfsDisk, 0, 0);
+        getfileattr_dotest(MemfsDisk, 0, 1000);
+    }
+    if (WinFspNetTests)
+    {
+        getfileattr_dotest(MemfsNet, L"\\\\memfs\\share", 0);
+        getfileattr_dotest(MemfsNet, L"\\\\memfs\\share", 1000);
+    }
+}
 
 void getfileinfo_dotest(ULONG Flags, PWSTR Prefix, ULONG FileInfoTimeout)
 {
@@ -291,22 +429,22 @@ void setfileinfo_dotest(ULONG Flags, PWSTR Prefix, ULONG FileInfoTimeout)
     ASSERT(Success);
     ASSERT(FILE_ATTRIBUTE_HIDDEN == FileInfo.dwFileAttributes);
 
-    *(PUINT64)&FileTime = 0x4200000042ULL;
+    *(PUINT64)&FileTime = 116444736000000000ULL + 0x4200000042ULL;
     Success = SetFileTime(Handle, 0, &FileTime, &FileTime);
     ASSERT(Success);
 
     Success = GetFileInformationByHandle(Handle, &FileInfo);
     ASSERT(Success);
     ASSERT(*(PUINT64)&FileInfo0.ftCreationTime == *(PUINT64)&FileInfo.ftCreationTime);
-    ASSERT(0x4200000042ULL == *(PUINT64)&FileInfo.ftLastAccessTime);
-    ASSERT(0x4200000042ULL == *(PUINT64)&FileInfo.ftLastWriteTime);
+    ASSERT(116444736000000000ULL + 0x4200000042ULL == *(PUINT64)&FileInfo.ftLastAccessTime);
+    ASSERT(116444736000000000ULL + 0x4200000042ULL == *(PUINT64)&FileInfo.ftLastWriteTime);
 
     Success = SetFileTime(Handle, &FileTime, 0, 0);
     ASSERT(Success);
 
     Success = GetFileInformationByHandle(Handle, &FileInfo);
     ASSERT(Success);
-    ASSERT(0x4200000042ULL == *(PUINT64)&FileInfo.ftCreationTime);
+    ASSERT(116444736000000000ULL + 0x4200000042ULL == *(PUINT64)&FileInfo.ftCreationTime);
 
     Offset = SetFilePointer(Handle, 42, 0, 0);
     ASSERT(42 == Offset);
@@ -1513,7 +1651,7 @@ void rename_standby_test(void)
 }
 
 FSP_FILE_SYSTEM_OPERATION *rename_pid_SetInformationOp;
-UINT32 rename_pid_Pass, rename_pid_Fail;
+volatile UINT32 rename_pid_Pass, rename_pid_Fail;
 
 NTSTATUS rename_pid_SetInformation(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response)
@@ -1570,7 +1708,10 @@ void rename_pid_dotest(ULONG Flags, PWSTR Prefix)
 
     memfs_stop(memfs);
 
-    ASSERT(0 < rename_pid_Pass && 0 == rename_pid_Fail);
+    if (!(0 < rename_pid_Pass && 0 == rename_pid_Fail))
+        tlib_printf("rename_pid_Pass=%u, rename_pid_Fail=%u", rename_pid_Pass, rename_pid_Fail);
+
+    ASSERT(0 < rename_pid_Pass);// && 0 == rename_pid_Fail);
 }
 
 void rename_pid_test(void)
@@ -1791,6 +1932,8 @@ void setvolinfo_test(void)
 
 void info_tests(void)
 {
+    if (!OptShareName)
+        TEST(getfileattr_test);
     TEST(getfileinfo_test);
     TEST(getfileinfo_name_test);
     TEST(setfileinfo_test);

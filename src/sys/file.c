@@ -1,7 +1,7 @@
 /**
  * @file sys/file.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -37,6 +41,7 @@ NTSTATUS FspFileNodeOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject,
     UINT32 GrantedAccess, UINT32 ShareAccess,
     FSP_FILE_NODE **POpenedFileNode, PULONG PSharingViolationReason);
 VOID FspFileNodeCleanup(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject, PULONG PCleanupFlags);
+VOID FspFileNodeCleanupFlush(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject);
 VOID FspFileNodeCleanupComplete(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject);
 VOID FspFileNodeClose(FSP_FILE_NODE *FileNode,
     PFILE_OBJECT FileObject,    /* non-0 to remove share access */
@@ -56,10 +61,14 @@ NTSTATUS FspFileNodeRenameCheck(PDEVICE_OBJECT FsvolDeviceObject, PIRP OplockIrp
 VOID FspFileNodeRename(FSP_FILE_NODE *FileNode, PUNICODE_STRING NewFileName);
 VOID FspFileNodeGetFileInfo(FSP_FILE_NODE *FileNode, FSP_FSCTL_FILE_INFO *FileInfo);
 BOOLEAN FspFileNodeTryGetFileInfo(FSP_FILE_NODE *FileNode, FSP_FSCTL_FILE_INFO *FileInfo);
+BOOLEAN FspFileNodeTryGetFileInfoByName(PDEVICE_OBJECT FsvolDeviceObject, PIRP Irp,
+    PUNICODE_STRING FileName, FSP_FSCTL_FILE_INFO *FileInfo);
 VOID FspFileNodeSetFileInfo(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
     const FSP_FSCTL_FILE_INFO *FileInfo, BOOLEAN TruncateOnClose);
-BOOLEAN FspFileNodeTrySetFileInfoOnOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
-    const FSP_FSCTL_FILE_INFO *FileInfo, BOOLEAN TruncateOnClose);
+BOOLEAN FspFileNodeTrySetFileInfoAndSecurityOnOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
+    const FSP_FSCTL_FILE_INFO *FileInfo,
+    const PSECURITY_DESCRIPTOR SecurityDescriptor, ULONG SecurityDescriptorSize,
+    BOOLEAN TruncateOnClose);
 BOOLEAN FspFileNodeTrySetFileInfo(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
     const FSP_FSCTL_FILE_INFO *FileInfo, ULONG InfoChangeNumber);
 VOID FspFileNodeInvalidateFileInfo(FSP_FILE_NODE *FileNode);
@@ -80,6 +89,10 @@ VOID FspFileNodeSetStreamInfo(FSP_FILE_NODE *FileNode, PCVOID Buffer, ULONG Size
 BOOLEAN FspFileNodeTrySetStreamInfo(FSP_FILE_NODE *FileNode, PCVOID Buffer, ULONG Size,
     ULONG StreamInfoChangeNumber);
 VOID FspFileNodeInvalidateStreamInfo(FSP_FILE_NODE *FileNode);
+BOOLEAN FspFileNodeReferenceEa(FSP_FILE_NODE *FileNode, PCVOID *PBuffer, PULONG PSize);
+VOID FspFileNodeSetEa(FSP_FILE_NODE *FileNode, PCVOID Buffer, ULONG Size);
+BOOLEAN FspFileNodeTrySetEa(FSP_FILE_NODE *FileNode, PCVOID Buffer, ULONG Size,
+    ULONG EaChangeNumber);
 VOID FspFileNodeNotifyChange(FSP_FILE_NODE *FileNode, ULONG Filter, ULONG Action,
     BOOLEAN InvalidateCaches);
 NTSTATUS FspFileNodeProcessLockIrp(FSP_FILE_NODE *FileNode, PIRP Irp);
@@ -121,6 +134,7 @@ VOID FspFileNodeOplockComplete(PVOID Context, PIRP Irp);
 #pragma alloc_text(PAGE, FspFileNodeReleaseOwnerF)
 #pragma alloc_text(PAGE, FspFileNodeOpen)
 #pragma alloc_text(PAGE, FspFileNodeCleanup)
+#pragma alloc_text(PAGE, FspFileNodeCleanupFlush)
 #pragma alloc_text(PAGE, FspFileNodeCleanupComplete)
 #pragma alloc_text(PAGE, FspFileNodeClose)
 #pragma alloc_text(PAGE, FspFileNodeFlushAndPurgeCache)
@@ -130,8 +144,9 @@ VOID FspFileNodeOplockComplete(PVOID Context, PIRP Irp);
 #pragma alloc_text(PAGE, FspFileNodeRename)
 #pragma alloc_text(PAGE, FspFileNodeGetFileInfo)
 #pragma alloc_text(PAGE, FspFileNodeTryGetFileInfo)
+#pragma alloc_text(PAGE, FspFileNodeTryGetFileInfoByName)
 #pragma alloc_text(PAGE, FspFileNodeSetFileInfo)
-#pragma alloc_text(PAGE, FspFileNodeTrySetFileInfoOnOpen)
+#pragma alloc_text(PAGE, FspFileNodeTrySetFileInfoAndSecurityOnOpen)
 #pragma alloc_text(PAGE, FspFileNodeTrySetFileInfo)
 #pragma alloc_text(PAGE, FspFileNodeInvalidateFileInfo)
 #pragma alloc_text(PAGE, FspFileNodeReferenceSecurity)
@@ -147,6 +162,9 @@ VOID FspFileNodeOplockComplete(PVOID Context, PIRP Irp);
 // !#pragma alloc_text(PAGE, FspFileNodeSetStreamInfo)
 // !#pragma alloc_text(PAGE, FspFileNodeTrySetStreamInfo)
 // !#pragma alloc_text(PAGE, FspFileNodeInvalidateStreamInfo)
+#pragma alloc_text(PAGE, FspFileNodeReferenceEa)
+#pragma alloc_text(PAGE, FspFileNodeSetEa)
+#pragma alloc_text(PAGE, FspFileNodeTrySetEa)
 #pragma alloc_text(PAGE, FspFileNodeNotifyChange)
 #pragma alloc_text(PAGE, FspFileNodeProcessLockIrp)
 #pragma alloc_text(PAGE, FspFileNodeCompleteLockIrp)
@@ -350,6 +368,7 @@ VOID FspFileNodeDelete(FSP_FILE_NODE *FileNode)
 
     FsRtlTeardownPerStreamContexts(&FileNode->Header);
 
+    FspMetaCacheInvalidateItem(FsvolDeviceExtension->EaCache, FileNode->Ea);
     FspMetaCacheInvalidateItem(FsvolDeviceExtension->StreamInfoCache, FileNode->NonPaged->StreamInfo);
     FspMetaCacheInvalidateItem(FsvolDeviceExtension->DirInfoCache, FileNode->NonPaged->DirInfo);
     FspMetaCacheInvalidateItem(FsvolDeviceExtension->SecurityCache, FileNode->Security);
@@ -772,6 +791,59 @@ VOID FspFileNodeCleanup(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject, PULONG
     *PCleanupFlags = SingleHandle ? DeletePending | (SetAllocationSize << 1) : 0;
 }
 
+VOID FspFileNodeCleanupFlush(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject)
+{
+    /*
+     * Optionally flush the FileNode during Cleanup.
+     *
+     * The FileNode must be acquired exclusive (Full) when calling this function.
+     */
+
+    PAGED_CODE();
+
+    PDEVICE_OBJECT FsvolDeviceObject = FileNode->FsvolDeviceObject;
+    FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension = FspFsvolDeviceExtension(FsvolDeviceObject);
+
+    if (!FsvolDeviceExtension->VolumeParams.FlushAndPurgeOnCleanup)
+        return; /* nothing to do! */
+
+    BOOLEAN DeletePending, SingleHandle;
+    LARGE_INTEGER TruncateSize, *PTruncateSize = 0;
+
+    FspFsvolDeviceLockContextTable(FsvolDeviceObject);
+
+    DeletePending = 0 != FileNode->DeletePending;
+    MemoryBarrier();
+
+    SingleHandle = 1 == FileNode->HandleCount;
+
+    if (SingleHandle && FileNode->TruncateOnClose)
+    {
+        /*
+         * Even when the FileInfo is expired, this is the best guess for a file size
+         * without asking the user-mode file system.
+         */
+        TruncateSize = FileNode->Header.FileSize;
+        PTruncateSize = &TruncateSize;
+    }
+
+    FspFsvolDeviceUnlockContextTable(FsvolDeviceObject);
+
+    /* Flush and purge on last Cleanup. Keeps files off the "standby" list. (GitHub issue #104) */
+    if (SingleHandle && !DeletePending)
+    {
+        IO_STATUS_BLOCK IoStatus;
+        LARGE_INTEGER ZeroOffset = { 0 };
+
+        if (0 != PTruncateSize && 0 == PTruncateSize->HighPart)
+            FspCcFlushCache(FileObject->SectionObjectPointer, &ZeroOffset, PTruncateSize->LowPart,
+                &IoStatus);
+        else
+            FspCcFlushCache(FileObject->SectionObjectPointer, 0, 0,
+                &IoStatus);
+    }
+}
+
 VOID FspFileNodeCleanupComplete(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject)
 {
     /*
@@ -789,9 +861,9 @@ VOID FspFileNodeCleanupComplete(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject
     PAGED_CODE();
 
     PDEVICE_OBJECT FsvolDeviceObject = FileNode->FsvolDeviceObject;
+    FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension = FspFsvolDeviceExtension(FsvolDeviceObject);
     LARGE_INTEGER TruncateSize, *PTruncateSize = 0;
-    BOOLEAN DeletePending;
-    BOOLEAN DeletedFromContextTable = FALSE;
+    BOOLEAN DeletePending, DeletedFromContextTable = FALSE, SingleHandle = FALSE;
 
     FspFsvolDeviceLockContextTable(FsvolDeviceObject);
 
@@ -816,6 +888,8 @@ VOID FspFileNodeCleanupComplete(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject
     ASSERT(0 < FileNode->HandleCount);
     if (0 == --FileNode->HandleCount)
     {
+        SingleHandle = TRUE;
+
         DeletePending = 0 != FileNode->DeletePending;
         MemoryBarrier();
 
@@ -832,7 +906,7 @@ VOID FspFileNodeCleanupComplete(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject
              * We now have to deal with the scenario where there are cleaned up,
              * but unclosed streams for this file still in the context table.
              */
-            if (FspFsvolDeviceExtension(FsvolDeviceObject)->VolumeParams.NamedStreams &&
+            if (FsvolDeviceExtension->VolumeParams.NamedStreams &&
                 0 == FileNode->MainFileNode)
             {
                 BOOLEAN StreamDeletedFromContextTable;
@@ -869,8 +943,6 @@ VOID FspFileNodeCleanupComplete(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject
 
         if (DeletePending || FileNode->TruncateOnClose)
         {
-            FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension =
-                FspFsvolDeviceExtension(FsvolDeviceObject);
             UINT64 AllocationUnit =
                 FsvolDeviceExtension->VolumeParams.SectorSize *
                 FsvolDeviceExtension->VolumeParams.SectorsPerAllocationUnit;
@@ -890,6 +962,34 @@ VOID FspFileNodeCleanupComplete(FSP_FILE_NODE *FileNode, PFILE_OBJECT FileObject
     }
 
     FspFsvolDeviceUnlockContextTable(FsvolDeviceObject);
+
+    /* Flush and purge on last Cleanup. Keeps files off the "standby" list. (GitHub issue #104) */
+    if (SingleHandle && FsvolDeviceExtension->VolumeParams.FlushAndPurgeOnCleanup)
+    {
+        /*
+         * There is an important difference in behavior with respect to DeletePending when
+         * FlushAndPurgeOnCleanup is FALSE vs when it is TRUE.
+         *
+         * With FlushAndPurgeOnCleanup==FALSE (the default), the WinFsp FSD preserves data
+         * and allows a deleted file to have memory-mapped I/O done on it after the CLEANUP
+         * completes. It is up to the user mode file system to decide whether to handle
+         * this scenario or not. The MEMFS reference file system does.
+         *
+         * With FlushAndPurgeOnCleanup==TRUE, the FSD simply purges the cache section (if any),
+         * which means that CACHED DATA WILL BE LOST. This is desirable, because we do not want
+         * to unnecessarily flush data that are soon going to be deleted.
+         *
+         * This could affect a program that does memory-mapped I/O on a deleted file that has
+         * been CloseHandle'd. Tests have shown that even NTFS cannot properly handle this
+         * scenario in all cases (for example, when the file is not cached), so it is unlikely
+         * that there are any useful programs out there that do this.
+         *
+         * So we deem this difference in behavior ok and desirable.
+         */
+
+        TruncateSize.QuadPart = 0;
+        PTruncateSize = &TruncateSize;
+    }
 
     CcUninitializeCacheMap(FileObject, PTruncateSize, 0);
 
@@ -1237,8 +1337,9 @@ NTSTATUS FspFileNodeRenameCheck(PDEVICE_OBJECT FsvolDeviceObject, PIRP OplockIrp
                 !MmFlushImageSection(&DescendantFileNode->NonPaged->SectionObjectPointers,
                     MmFlushForDelete)))
             {
-                /* release the FileNode in case of failure! */
+                /* release the FileNode and rename lock in case of failure! */
                 FspFileNodeReleaseF(FileNode, AcquireFlags);
+                FspFsvolDeviceFileRenameRelease(FsvolDeviceObject);
 
                 Result = STATUS_ACCESS_DENIED;
                 goto exit;
@@ -1341,8 +1442,9 @@ NTSTATUS FspFileNodeRenameCheck(PDEVICE_OBJECT FsvolDeviceObject, PIRP OplockIrp
 
     if (STATUS_OPLOCK_BREAK_IN_PROGRESS == Result || !NT_SUCCESS(Result))
     {
-        /* release the FileNode so that we can safely wait without deadlocks */
+        /* release the FileNode and rename lock so that we can safely wait without deadlocks */
         FspFileNodeReleaseF(FileNode, AcquireFlags);
+        FspFsvolDeviceFileRenameRelease(FsvolDeviceObject);
 
         /* wait for oplock breaks to finish */
         for (
@@ -1388,8 +1490,9 @@ NTSTATUS FspFileNodeRenameCheck(PDEVICE_OBJECT FsvolDeviceObject, PIRP OplockIrp
 
         if (DescendantFileNode != FileNode && 0 < DescendantFileNode->HandleCount)
         {
-            /* release the FileNode in case of failure! */
+            /* release the FileNode and rename lock in case of failure! */
             FspFileNodeReleaseF(FileNode, AcquireFlags);
+            FspFsvolDeviceFileRenameRelease(FsvolDeviceObject);
 
             Result = STATUS_ACCESS_DENIED;
             break;
@@ -1531,6 +1634,7 @@ VOID FspFileNodeGetFileInfo(FSP_FILE_NODE *FileNode, FSP_FSCTL_FILE_INFO *FileIn
     FileInfo->LastAccessTime = FileNode->LastAccessTime;
     FileInfo->LastWriteTime = FileNode->LastWriteTime;
     FileInfo->ChangeTime = FileNode->ChangeTime;
+    FileInfo->EaSize = FileNode->EaSize;
 }
 
 BOOLEAN FspFileNodeTryGetFileInfo(FSP_FILE_NODE *FileNode, FSP_FSCTL_FILE_INFO *FileInfo)
@@ -1551,6 +1655,78 @@ BOOLEAN FspFileNodeTryGetFileInfo(FSP_FILE_NODE *FileNode, FSP_FSCTL_FILE_INFO *
 
     FspFileNodeGetFileInfo(FileNode, FileInfo);
     return TRUE;
+}
+
+BOOLEAN FspFileNodeTryGetFileInfoByName(PDEVICE_OBJECT FsvolDeviceObject, PIRP Irp,
+    PUNICODE_STRING FileName, FSP_FSCTL_FILE_INFO *FileInfo)
+{
+    PAGED_CODE();
+
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    PACCESS_STATE AccessState = IrpSp->Parameters.Create.SecurityContext->AccessState;
+    ACCESS_MASK DesiredAccess = AccessState->RemainingDesiredAccess;
+    ACCESS_MASK GrantedAccess = AccessState->PreviouslyGrantedAccess;
+    KPROCESSOR_MODE RequestorMode =
+        FlagOn(IrpSp->Flags, SL_FORCE_ACCESS_CHECK) ? UserMode : Irp->RequestorMode;
+    BOOLEAN HasTraversePrivilege =
+        BooleanFlagOn(AccessState->Flags, TOKEN_HAS_TRAVERSE_PRIVILEGE);
+    FSP_FILE_NODE *FileNode;
+    PVOID SecurityBuffer;
+    BOOLEAN Result;
+
+    if (UserMode == RequestorMode)
+    {
+        /* user mode: allow only FILE_READ_ATTRIBUTES with traverse privilege */
+        if (FILE_READ_ATTRIBUTES != DesiredAccess || !HasTraversePrivilege)
+            return FALSE;
+    }
+    else
+        /* kernel mode: anything goes! */
+        DesiredAccess = 0;
+
+    FspFsvolDeviceLockContextTable(FsvolDeviceObject);
+    FileNode = FspFsvolDeviceLookupContextByName(FsvolDeviceObject, FileName);
+    if (0 != FileNode)
+        FspFileNodeReference(FileNode);
+    FspFsvolDeviceUnlockContextTable(FsvolDeviceObject);
+
+    Result = FALSE;
+    if (0 != FileNode)
+    {
+        FspFileNodeAcquireShared(FileNode, Main);
+
+        if (0 != DesiredAccess)
+        {
+            ASSERT(FILE_READ_ATTRIBUTES == DesiredAccess);
+
+            if (FspFileNodeReferenceSecurity(FileNode, &SecurityBuffer, 0))
+            {
+                NTSTATUS AccessStatus;
+                Result = SeAccessCheck(
+                    SecurityBuffer,
+                    &AccessState->SubjectSecurityContext,
+                    TRUE,
+                    DesiredAccess,
+                    GrantedAccess,
+                    0,
+                    IoGetFileObjectGenericMapping(),
+                    RequestorMode,
+                    &GrantedAccess,
+                    &AccessStatus);
+
+                FspFileNodeDereferenceSecurity(SecurityBuffer);
+
+                Result = Result && FspFileNodeTryGetFileInfo(FileNode, FileInfo);
+            }
+        }
+        else
+            Result = FspFileNodeTryGetFileInfo(FileNode, FileInfo);
+
+        FspFileNodeRelease(FileNode, Main);
+        FspFileNodeDereference(FileNode);
+    }
+
+    return Result;
 }
 
 VOID FspFileNodeSetFileInfo(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
@@ -1606,6 +1782,7 @@ VOID FspFileNodeSetFileInfo(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
     MainFileNode->LastAccessTime = FileInfo->LastAccessTime;
     MainFileNode->LastWriteTime = FileInfo->LastWriteTime;
     MainFileNode->ChangeTime = FileInfo->ChangeTime;
+    MainFileNode->EaSize = FileInfo->EaSize;
 
     if (0 != CcFileObject)
     {
@@ -1663,8 +1840,10 @@ VOID FspFileNodeSetFileInfo(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
     }
 }
 
-BOOLEAN FspFileNodeTrySetFileInfoOnOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
-    const FSP_FSCTL_FILE_INFO *FileInfo, BOOLEAN TruncateOnClose)
+BOOLEAN FspFileNodeTrySetFileInfoAndSecurityOnOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT CcFileObject,
+    const FSP_FSCTL_FILE_INFO *FileInfo,
+    const PSECURITY_DESCRIPTOR SecurityDescriptor, ULONG SecurityDescriptorSize,
+    BOOLEAN TruncateOnClose)
 {
     PAGED_CODE();
 
@@ -1697,6 +1876,8 @@ BOOLEAN FspFileNodeTrySetFileInfoOnOpen(FSP_FILE_NODE *FileNode, PFILE_OBJECT Cc
     }
 
     FspFileNodeSetFileInfo(FileNode, CcFileObject, FileInfo, TruncateOnClose);
+    if (0 != SecurityDescriptor)
+        FspFileNodeSetSecurity(FileNode, SecurityDescriptor, SecurityDescriptorSize);
     return TRUE;
 }
 
@@ -1947,6 +2128,48 @@ VOID FspFileNodeInvalidateStreamInfo(FSP_FILE_NODE *FileNode)
     FspMetaCacheInvalidateItem(FsvolDeviceExtension->StreamInfoCache, StreamInfo);
 }
 
+BOOLEAN FspFileNodeReferenceEa(FSP_FILE_NODE *FileNode, PCVOID *PBuffer, PULONG PSize)
+{
+    PAGED_CODE();
+
+    if (0 != FileNode->MainFileNode)
+        FileNode = FileNode->MainFileNode;
+
+    FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension =
+        FspFsvolDeviceExtension(FileNode->FsvolDeviceObject);
+
+    return FspMetaCacheReferenceItemBuffer(FsvolDeviceExtension->EaCache,
+        FileNode->Ea, PBuffer, PSize);
+}
+
+VOID FspFileNodeSetEa(FSP_FILE_NODE *FileNode, PCVOID Buffer, ULONG Size)
+{
+    PAGED_CODE();
+
+    if (0 != FileNode->MainFileNode)
+        FileNode = FileNode->MainFileNode;
+
+    FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension =
+        FspFsvolDeviceExtension(FileNode->FsvolDeviceObject);
+
+    FspMetaCacheInvalidateItem(FsvolDeviceExtension->EaCache, FileNode->Ea);
+    FileNode->Ea = 0 != Buffer ?
+        FspMetaCacheAddItem(FsvolDeviceExtension->EaCache, Buffer, Size) : 0;
+    FileNode->EaChangeNumber++;
+}
+
+BOOLEAN FspFileNodeTrySetEa(FSP_FILE_NODE *FileNode, PCVOID Buffer, ULONG Size,
+    ULONG EaChangeNumber)
+{
+    PAGED_CODE();
+
+    if (FspFileNodeEaChangeNumber(FileNode) != EaChangeNumber)
+        return FALSE;
+
+    FspFileNodeSetEa(FileNode, Buffer, Size);
+    return TRUE;
+}
+
 VOID FspFileNodeNotifyChange(FSP_FILE_NODE *FileNode, ULONG Filter, ULONG Action,
     BOOLEAN InvalidateCaches)
 {
@@ -2166,7 +2389,7 @@ NTSTATUS FspFileDescSetDirectoryMarker(FSP_FILE_DESC *FileDesc,
         FspFsvolDeviceExtension(FileDesc->FileNode->FsvolDeviceObject);
     UNICODE_STRING DirectoryMarker;
 
-    if (FsvolDeviceExtension->VolumeParams.MaxComponentLength < FileName->Length)
+    if (FsvolDeviceExtension->VolumeParams.MaxComponentLength * sizeof(WCHAR) < FileName->Length)
         return STATUS_OBJECT_NAME_INVALID;
 
     DirectoryMarker.Length = DirectoryMarker.MaximumLength = FileName->Length;

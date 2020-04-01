@@ -1,7 +1,7 @@
 /**
  * @file memfs.cpp
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #undef _DEBUG
@@ -23,9 +27,18 @@
 #include <map>
 #include <unordered_map>
 
+/* SLOWIO */
+#include <thread>
+
 #define MEMFS_MAX_PATH                  512
 FSP_FSCTL_STATIC_ASSERT(MEMFS_MAX_PATH > MAX_PATH,
     "MEMFS_MAX_PATH must be greater than MAX_PATH.");
+
+/*
+ * Define the MEMFS_STANDALONE macro when building MEMFS as a standalone file system.
+ * This macro should be defined in the Visual Studio project settings, Makefile, etc.
+ */
+//#define MEMFS_STANDALONE
 
 /*
  * Define the MEMFS_NAME_NORMALIZATION macro to include name normalization support.
@@ -41,6 +54,39 @@ FSP_FSCTL_STATIC_ASSERT(MEMFS_MAX_PATH > MAX_PATH,
  * Define the MEMFS_NAMED_STREAMS macro to include named streams support.
  */
 #define MEMFS_NAMED_STREAMS
+
+/*
+ * Define the MEMFS_DIRINFO_BY_NAME macro to include GetDirInfoByName.
+ */
+#define MEMFS_DIRINFO_BY_NAME
+
+/*
+ * Define the MEMFS_SLOWIO macro to include delayed I/O response support.
+ */
+#define MEMFS_SLOWIO
+
+/*
+ * Define the MEMFS_CONTROL macro to include DeviceControl support.
+ */
+#define MEMFS_CONTROL
+
+/*
+ * Define the MEMFS_EA macro to include extended attributes support.
+ */
+#define MEMFS_EA
+
+/*
+ * Define the MEMFS_WSL macro to include WSLinux support.
+ */
+#define MEMFS_WSL
+
+/*
+ * Define the MEMFS_REJECT_EARLY_IRP macro to reject IRP's sent
+ * to the file system prior to the dispatcher being started.
+ */
+#if defined(MEMFS_STANDALONE)
+#define MEMFS_REJECT_EARLY_IRP
+#endif
 
 /*
  * Define the DEBUG_BUFFER_CHECK macro on Windows 8 or above. This includes
@@ -137,33 +183,67 @@ UINT64 MemfsGetSystemTime(VOID)
 }
 
 static inline
-int MemfsCompareString(PWSTR a, int alen, PWSTR b, int blen, BOOLEAN CaseInsensitive)
+int MemfsFileNameCompare(PWSTR a, int alen, PWSTR b, int blen, BOOLEAN CaseInsensitive)
 {
-    int len, res;
+    PWSTR p, endp, partp, q, endq, partq;
+    WCHAR c, d;
+    int plen, qlen, len, res;
 
     if (-1 == alen)
-        alen = (int)wcslen(a);
+        alen = lstrlenW(a);
     if (-1 == blen)
-        blen = (int)wcslen(b);
+        blen = lstrlenW(b);
 
-    len = alen < blen ? alen : blen;
+    for (p = a, endp = p + alen, q = b, endq = q + blen; endp > p && endq > q;)
+    {
+        c = d = 0;
+        for (; endp > p && (L':' == *p || L'\\' == *p); p++)
+            c = *p;
+        for (; endq > q && (L':' == *q || L'\\' == *q); q++)
+            d = *q;
 
-    /* we should still be in the C locale */
-    if (CaseInsensitive)
-        res = _wcsnicmp(a, b, len);
-    else
-        res = wcsncmp(a, b, len);
+        if (L':' == c)
+            c = 1;
+        else if (L'\\' == c)
+            c = 2;
+        if (L':' == d)
+            d = 1;
+        else if (L'\\' == d)
+            d = 2;
 
-    if (0 == res)
-        res = alen - blen;
+        res = c - d;
+        if (0 != res)
+            return res;
 
-    return res;
-}
+        for (partp = p; endp > p && L':' != *p && L'\\' != *p; p++)
+            ;
+        for (partq = q; endq > q && L':' != *q && L'\\' != *q; q++)
+            ;
 
-static inline
-int MemfsFileNameCompare(PWSTR a, PWSTR b, BOOLEAN CaseInsensitive)
-{
-    return MemfsCompareString(a, -1, b, -1, CaseInsensitive);
+        plen = (int)(p - partp);
+        qlen = (int)(q - partq);
+
+        len = plen < qlen ? plen : qlen;
+
+        if (CaseInsensitive)
+        {
+            res = CompareStringW(LOCALE_INVARIANT, NORM_IGNORECASE, partp, plen, partq, qlen);
+            if (0 != res)
+                res -= 2;
+            else
+                res = _wcsnicmp(partp, partq, len);
+        }
+        else
+            res = wcsncmp(partp, partq, len);
+
+        if (0 == res)
+            res = plen - qlen;
+
+        if (0 != res)
+            return res;
+    }
+
+    return -(endp <= p) + (endq <= q);
 }
 
 static inline
@@ -172,7 +252,7 @@ BOOLEAN MemfsFileNameHasPrefix(PWSTR a, PWSTR b, BOOLEAN CaseInsensitive)
     int alen = (int)wcslen(a);
     int blen = (int)wcslen(b);
 
-    return alen >= blen && 0 == MemfsCompareString(a, blen, b, blen, CaseInsensitive) &&
+    return alen >= blen && 0 == MemfsFileNameCompare(a, blen, b, blen, CaseInsensitive) &&
         (alen == blen || (1 == blen && L'\\' == b[0]) ||
 #if defined(MEMFS_NAMED_STREAMS)
             (L'\\' == a[blen] || L':' == a[blen]));
@@ -180,6 +260,36 @@ BOOLEAN MemfsFileNameHasPrefix(PWSTR a, PWSTR b, BOOLEAN CaseInsensitive)
             (L'\\' == a[blen]));
 #endif
 }
+
+#if defined(MEMFS_EA)
+static inline
+int MemfsEaNameCompare(PSTR a, PSTR b)
+{
+    /* EA names are always case-insensitive in MEMFS (to be inline with NTFS) */
+
+    int res;
+
+    res = CompareStringA(LOCALE_INVARIANT, NORM_IGNORECASE, a, -1, b, -1);
+    if (0 != res)
+        res -= 2;
+    else
+        res = _stricmp(a, b);
+
+    return res;
+}
+
+struct MEMFS_FILE_NODE_EA_LESS
+{
+    MEMFS_FILE_NODE_EA_LESS()
+    {
+    }
+    bool operator()(PSTR a, PSTR b) const
+    {
+        return 0 > MemfsEaNameCompare(a, b);
+    }
+};
+typedef std::map<PSTR, FILE_FULL_EA_INFORMATION *, MEMFS_FILE_NODE_EA_LESS> MEMFS_FILE_NODE_EA_MAP;
+#endif
 
 typedef struct _MEMFS_FILE_NODE
 {
@@ -191,6 +301,9 @@ typedef struct _MEMFS_FILE_NODE
 #if defined(MEMFS_REPARSE_POINTS)
     SIZE_T ReparseDataSize;
     PVOID ReparseData;
+#endif
+#if defined(MEMFS_EA)
+    MEMFS_FILE_NODE_EA_MAP *EaMap;
 #endif
     volatile LONG RefCount;
 #if defined(MEMFS_NAMED_STREAMS)
@@ -205,7 +318,7 @@ struct MEMFS_FILE_NODE_LESS
     }
     bool operator()(PWSTR a, PWSTR b) const
     {
-        return 0 > MemfsFileNameCompare(a, b, CaseInsensitive);
+        return 0 > MemfsFileNameCompare(a, -1, b, -1, CaseInsensitive);
     }
     BOOLEAN CaseInsensitive;
 };
@@ -217,6 +330,12 @@ typedef struct _MEMFS
     MEMFS_FILE_NODE_MAP *FileNodeMap;
     ULONG MaxFileNodes;
     ULONG MaxFileSize;
+#ifdef MEMFS_SLOWIO
+    ULONG SlowioMaxDelay;
+    ULONG SlowioPercentDelay;
+    ULONG SlowioRarefyDelay;
+    volatile LONG SlowioThreadsRunning;
+#endif
     UINT16 VolumeLabelLength;
     WCHAR VolumeLabel[32];
 } MEMFS;
@@ -246,9 +365,28 @@ NTSTATUS MemfsFileNodeCreate(PWSTR FileName, MEMFS_FILE_NODE **PFileNode)
     return STATUS_SUCCESS;
 }
 
+#if defined(MEMFS_EA)
+static inline
+VOID MemfsFileNodeDeleteEaMap(MEMFS_FILE_NODE *FileNode)
+{
+    if (0 != FileNode->EaMap)
+    {
+        for (MEMFS_FILE_NODE_EA_MAP::iterator p = FileNode->EaMap->begin(), q = FileNode->EaMap->end();
+            p != q; ++p)
+            free(p->second);
+        delete FileNode->EaMap;
+        FileNode->EaMap = 0;
+        FileNode->FileInfo.EaSize = 0;
+    }
+}
+#endif
+
 static inline
 VOID MemfsFileNodeDelete(MEMFS_FILE_NODE *FileNode)
 {
+#if defined(MEMFS_EA)
+    MemfsFileNodeDeleteEaMap(FileNode);
+#endif
 #if defined(MEMFS_REPARSE_POINTS)
     free(FileNode->ReparseData);
 #endif
@@ -288,6 +426,127 @@ VOID MemfsFileNodeGetFileInfo(MEMFS_FILE_NODE *FileNode, FSP_FSCTL_FILE_INFO *Fi
     *FileInfo = FileNode->FileInfo;
 #endif
 }
+
+#if defined(MEMFS_EA)
+static inline
+NTSTATUS MemfsFileNodeGetEaMap(MEMFS_FILE_NODE *FileNode, MEMFS_FILE_NODE_EA_MAP **PEaMap)
+{
+#if defined(MEMFS_NAMED_STREAMS)
+    if (0 != FileNode->MainFileNode)
+        FileNode = FileNode->MainFileNode;
+#endif
+
+    *PEaMap = FileNode->EaMap;
+    if (0 != *PEaMap)
+        return STATUS_SUCCESS;
+
+    try
+    {
+        *PEaMap = FileNode->EaMap = new MEMFS_FILE_NODE_EA_MAP(MEMFS_FILE_NODE_EA_LESS());
+        return STATUS_SUCCESS;
+    }
+    catch (...)
+    {
+        *PEaMap = 0;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+}
+
+static inline
+NTSTATUS MemfsFileNodeSetEa(
+    FSP_FILE_SYSTEM *FileSystem, PVOID Context,
+    PFILE_FULL_EA_INFORMATION Ea)
+{
+    MEMFS_FILE_NODE *FileNode = (MEMFS_FILE_NODE *)Context;
+    MEMFS_FILE_NODE_EA_MAP *EaMap;
+    FILE_FULL_EA_INFORMATION *FileNodeEa = 0;
+    MEMFS_FILE_NODE_EA_MAP::iterator p;
+    ULONG EaSizePlus = 0, EaSizeMinus = 0;
+    NTSTATUS Result;
+
+    Result = MemfsFileNodeGetEaMap(FileNode, &EaMap);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    if (0 != Ea->EaValueLength)
+    {
+        EaSizePlus = FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) +
+            Ea->EaNameLength + 1 + Ea->EaValueLength;
+        FileNodeEa = (FILE_FULL_EA_INFORMATION *)malloc(EaSizePlus);
+        if (0 == FileNodeEa)
+            return STATUS_INSUFFICIENT_RESOURCES;
+        memcpy(FileNodeEa, Ea, EaSizePlus);
+        FileNodeEa->NextEntryOffset = 0;
+
+        EaSizePlus = FspFileSystemGetEaPackedSize(Ea);
+    }
+
+    p = EaMap->find(Ea->EaName);
+    if (p != EaMap->end())
+    {
+        EaSizeMinus = FspFileSystemGetEaPackedSize(Ea);
+
+        free(p->second);
+        EaMap->erase(p);
+    }
+
+    if (0 != Ea->EaValueLength)
+    {
+        try
+        {
+            EaMap->insert(MEMFS_FILE_NODE_EA_MAP::value_type(FileNodeEa->EaName, FileNodeEa));
+        }
+        catch (...)
+        {
+            free(FileNodeEa);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    FileNode->FileInfo.EaSize = FileNode->FileInfo.EaSize + EaSizePlus - EaSizeMinus;
+
+    return STATUS_SUCCESS;
+}
+
+static inline
+BOOLEAN MemfsFileNodeNeedEa(MEMFS_FILE_NODE *FileNode)
+{
+#if defined(MEMFS_NAMED_STREAMS)
+    if (0 != FileNode->MainFileNode)
+        FileNode = FileNode->MainFileNode;
+#endif
+
+    if (0 != FileNode->EaMap)
+    {
+        for (MEMFS_FILE_NODE_EA_MAP::iterator p = FileNode->EaMap->begin(), q = FileNode->EaMap->end();
+            p != q; ++p)
+            if (0 != (p->second->Flags & FILE_NEED_EA))
+                return TRUE;
+    }
+
+    return FALSE;
+}
+
+static inline
+BOOLEAN MemfsFileNodeEnumerateEa(MEMFS_FILE_NODE *FileNode,
+    BOOLEAN (*EnumFn)(PFILE_FULL_EA_INFORMATION Ea, PVOID), PVOID Context)
+{
+#if defined(MEMFS_NAMED_STREAMS)
+    if (0 != FileNode->MainFileNode)
+        FileNode = FileNode->MainFileNode;
+#endif
+
+    if (0 != FileNode->EaMap)
+    {
+        for (MEMFS_FILE_NODE_EA_MAP::iterator p = FileNode->EaMap->begin(), q = FileNode->EaMap->end();
+            p != q; ++p)
+            if (!EnumFn(p->second, Context))
+                return FALSE;
+    }
+
+    return TRUE;
+}
+#endif
 
 static inline
 VOID MemfsFileNodeMapDump(MEMFS_FILE_NODE_MAP *FileNodeMap)
@@ -446,7 +705,7 @@ BOOLEAN MemfsFileNodeMapHasChild(MEMFS_FILE_NODE_MAP *FileNodeMap, MEMFS_FILE_NO
             continue;
 #endif
         FspPathSuffix(iter->second->FileName, &Remain, &Suffix, Root);
-        Result = 0 == MemfsFileNameCompare(Remain, FileNode->FileName,
+        Result = 0 == MemfsFileNameCompare(Remain, -1, FileNode->FileName, -1,
             MemfsFileNodeMapIsCaseInsensitive(FileNodeMap));
         FspPathCombine(iter->second->FileName, Suffix);
         break;
@@ -483,7 +742,7 @@ BOOLEAN MemfsFileNodeMapEnumerateChildren(MEMFS_FILE_NODE_MAP *FileNodeMap, MEMF
             MemfsFileNodeMapIsCaseInsensitive(FileNodeMap)))
             break;
         FspPathSuffix(iter->second->FileName, &Remain, &Suffix, Root);
-        IsDirectoryChild = 0 == MemfsFileNameCompare(Remain, FileNode->FileName,
+        IsDirectoryChild = 0 == MemfsFileNameCompare(Remain, -1, FileNode->FileName, -1,
             MemfsFileNodeMapIsCaseInsensitive(FileNodeMap));
 #if defined(MEMFS_NAMED_STREAMS)
         IsDirectoryChild = IsDirectoryChild && 0 == wcschr(Suffix, L':');
@@ -581,6 +840,126 @@ VOID MemfsFileNodeMapEnumerateFree(MEMFS_FILE_NODE_MAP_ENUM_CONTEXT *Context)
     }
     free(Context->FileNodes);
 }
+
+#ifdef MEMFS_SLOWIO
+/*
+ * SLOWIO
+ *
+ * This is included for two uses:
+ *
+ * 1) For testing winfsp, by allowing memfs to act more like a non-ram file system,
+ *    with some IO taking many milliseconds, and some IO completion delayed.
+ *
+ * 2) As sample code for how to use winfsp's STATUS_PENDING capabilities.
+ * 
+ */
+
+static inline UINT64 Hash(UINT64 x)
+{
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    x =  x ^ (x >> 31);
+    return x;
+}
+
+static inline ULONG PseudoRandom(ULONG to)
+{
+    /* John Oberschelp's PRNG */
+    static UINT64 spin = 0;
+    InterlockedIncrement(&spin);
+    return Hash(spin) % to;
+}
+
+static inline BOOLEAN SlowioReturnPending(FSP_FILE_SYSTEM *FileSystem)
+{
+    MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
+    if (0 == Memfs->SlowioMaxDelay)
+        return FALSE;
+    return PseudoRandom(100) < Memfs->SlowioPercentDelay;
+}
+
+static inline VOID SlowioSnooze(FSP_FILE_SYSTEM *FileSystem)
+{
+    MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
+    if (0 == Memfs->SlowioMaxDelay)
+        return;
+    ULONG millis = PseudoRandom(Memfs->SlowioMaxDelay + 1) >> PseudoRandom(Memfs->SlowioRarefyDelay + 1);
+    Sleep(millis);
+}
+
+void SlowioReadThread(
+    FSP_FILE_SYSTEM *FileSystem,
+    MEMFS_FILE_NODE *FileNode,
+    PVOID Buffer, 
+    UINT64 Offset, 
+    UINT64 EndOffset,
+    UINT64 RequestHint)
+{
+    SlowioSnooze(FileSystem);
+
+    memcpy(Buffer, (PUINT8)FileNode->FileData + Offset, (size_t)(EndOffset - Offset));
+    UINT32 BytesTransferred = (ULONG)(EndOffset - Offset);
+
+    FSP_FSCTL_TRANSACT_RSP ResponseBuf;
+    memset(&ResponseBuf, 0, sizeof ResponseBuf);
+    ResponseBuf.Size = sizeof ResponseBuf;
+    ResponseBuf.Kind = FspFsctlTransactReadKind;
+    ResponseBuf.Hint = RequestHint;                         // IRP that is being completed
+    ResponseBuf.IoStatus.Status = STATUS_SUCCESS;
+    ResponseBuf.IoStatus.Information = BytesTransferred;    // bytes read
+    FspFileSystemSendResponse(FileSystem, &ResponseBuf);
+
+    MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
+    InterlockedDecrement(&Memfs->SlowioThreadsRunning);
+}
+
+void SlowioWriteThread(
+    FSP_FILE_SYSTEM *FileSystem,
+    MEMFS_FILE_NODE *FileNode,
+    PVOID Buffer, 
+    UINT64 Offset, 
+    UINT64 EndOffset,
+    UINT64 RequestHint)
+{
+    SlowioSnooze(FileSystem);
+
+    memcpy((PUINT8)FileNode->FileData + Offset, Buffer, (size_t)(EndOffset - Offset));
+    UINT32 BytesTransferred = (ULONG)(EndOffset - Offset);
+
+    FSP_FSCTL_TRANSACT_RSP ResponseBuf;
+    memset(&ResponseBuf, 0, sizeof ResponseBuf);
+    ResponseBuf.Size = sizeof ResponseBuf;
+    ResponseBuf.Kind = FspFsctlTransactWriteKind;
+    ResponseBuf.Hint = RequestHint;                         // IRP that is being completed
+    ResponseBuf.IoStatus.Status = STATUS_SUCCESS;
+    ResponseBuf.IoStatus.Information = BytesTransferred;    // bytes written
+    MemfsFileNodeGetFileInfo(FileNode, &ResponseBuf.Rsp.Write.FileInfo);
+    FspFileSystemSendResponse(FileSystem, &ResponseBuf);
+
+    MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
+    InterlockedDecrement(&Memfs->SlowioThreadsRunning);
+}
+
+void SlowioReadDirectoryThread(
+    FSP_FILE_SYSTEM *FileSystem,
+    ULONG BytesTransferred,
+    UINT64 RequestHint)
+{
+    SlowioSnooze(FileSystem);
+
+    FSP_FSCTL_TRANSACT_RSP ResponseBuf;
+    memset(&ResponseBuf, 0, sizeof ResponseBuf);
+    ResponseBuf.Size = sizeof ResponseBuf;
+    ResponseBuf.Kind = FspFsctlTransactQueryDirectoryKind;
+    ResponseBuf.Hint = RequestHint;                         // IRP that is being completed
+    ResponseBuf.IoStatus.Status = STATUS_SUCCESS;
+    ResponseBuf.IoStatus.Information = BytesTransferred;    // bytes of directory info read
+    FspFileSystemSendResponse(FileSystem, &ResponseBuf);
+
+    MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
+    InterlockedDecrement(&Memfs->SlowioThreadsRunning);
+}
+#endif
 
 /*
  * FSP_FILE_SYSTEM_INTERFACE
@@ -687,6 +1066,9 @@ static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM *FileSystem,
 static NTSTATUS Create(FSP_FILE_SYSTEM *FileSystem,
     PWSTR FileName, UINT32 CreateOptions, UINT32 GrantedAccess,
     UINT32 FileAttributes, PSECURITY_DESCRIPTOR SecurityDescriptor, UINT64 AllocationSize,
+#if defined(MEMFS_EA) || defined(MEMFS_WSL)
+    PVOID ExtraBuffer, ULONG ExtraLength, BOOLEAN ExtraBufferIsReparsePoint,
+#endif
     PVOID *PFileNode, FSP_FSCTL_FILE_INFO *FileInfo)
 {
     MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
@@ -726,7 +1108,7 @@ static NTSTATUS Create(FSP_FILE_SYSTEM *FileSystem,
         size_t RemainLength, BSlashLength, SuffixLength;
 
         FspPathSuffix(FileName, &Remain, &Suffix, Root);
-        assert(0 == MemfsCompareString(Remain, -1, ParentNode->FileName, -1, TRUE));
+        assert(0 == MemfsFileNameCompare(Remain, -1, ParentNode->FileName, -1, TRUE));
         FspPathCombine(FileName, Suffix);
 
         RemainLength = wcslen(ParentNode->FileName);
@@ -765,6 +1147,46 @@ static NTSTATUS Create(FSP_FILE_SYSTEM *FileSystem,
         }
         memcpy(FileNode->FileSecurity, SecurityDescriptor, FileNode->FileSecuritySize);
     }
+
+#if defined(MEMFS_EA) || defined(MEMFS_WSL)
+    if (0 != ExtraBuffer)
+    {
+#if defined(MEMFS_EA)
+        if (!ExtraBufferIsReparsePoint)
+        {
+            Result = FspFileSystemEnumerateEa(FileSystem, MemfsFileNodeSetEa, FileNode,
+                (PFILE_FULL_EA_INFORMATION)ExtraBuffer, ExtraLength);
+            if (!NT_SUCCESS(Result))
+            {
+                MemfsFileNodeDelete(FileNode);
+                return Result;
+            }
+        }
+#endif
+#if defined(MEMFS_WSL)
+        if (ExtraBufferIsReparsePoint)
+        {
+#if defined(MEMFS_REPARSE_POINTS)
+            FileNode->ReparseDataSize = ExtraLength;
+            FileNode->ReparseData = malloc(ExtraLength);
+            if (0 == FileNode->ReparseData && 0 != ExtraLength)
+            {
+                MemfsFileNodeDelete(FileNode);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            FileNode->FileInfo.FileAttributes |= FILE_ATTRIBUTE_REPARSE_POINT;
+            FileNode->FileInfo.ReparseTag = *(PULONG)ExtraBuffer;
+                /* the first field in a reparse buffer is the reparse tag */
+            memcpy(FileNode->ReparseData, ExtraBuffer, ExtraLength);
+#else
+            MemfsFileNodeDelete(FileNode);
+            return STATUS_INVALID_PARAMETER;
+#endif
+        }
+#endif
+    }
+#endif
 
     FileNode->FileInfo.AllocationSize = AllocationSize;
     if (0 != FileNode->FileInfo.AllocationSize)
@@ -823,6 +1245,22 @@ static NTSTATUS Open(FSP_FILE_SYSTEM *FileSystem,
         return Result;
     }
 
+#if defined(MEMFS_EA)
+    /* if the OP specified no EA's check the need EA count, but only if accessing main stream */
+    if (0 != (CreateOptions & FILE_NO_EA_KNOWLEDGE)
+#if defined(MEMFS_NAMED_STREAMS)
+        && (0 == FileNode->MainFileNode)
+#endif
+        )
+    {
+        if (MemfsFileNodeNeedEa(FileNode))
+        {
+            Result = STATUS_ACCESS_DENIED;
+            return Result;
+        }
+    }
+#endif
+
     MemfsFileNodeReference(FileNode);
     *PFileNode = FileNode;
     MemfsFileNodeGetFileInfo(FileNode, FileInfo);
@@ -843,6 +1281,9 @@ static NTSTATUS Open(FSP_FILE_SYSTEM *FileSystem,
 
 static NTSTATUS Overwrite(FSP_FILE_SYSTEM *FileSystem,
     PVOID FileNode0, UINT32 FileAttributes, BOOLEAN ReplaceFileAttributes, UINT64 AllocationSize,
+#if defined(MEMFS_EA)
+    PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength,
+#endif
     FSP_FSCTL_FILE_INFO *FileInfo)
 {
     MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
@@ -863,6 +1304,16 @@ static NTSTATUS Overwrite(FSP_FILE_SYSTEM *FileSystem,
             MemfsFileNodeMapRemove(Memfs->FileNodeMap, Context.FileNodes[Index]);
     }
     MemfsFileNodeMapEnumerateFree(&Context);
+#endif
+
+#if defined(MEMFS_EA)
+    MemfsFileNodeDeleteEaMap(FileNode);
+    if (0 != Ea)
+    {
+        Result = FspFileSystemEnumerateEa(FileSystem, MemfsFileNodeSetEa, FileNode, Ea, EaLength);
+        if (!NT_SUCCESS(Result))
+            return Result;
+    }
 #endif
 
     Result = SetFileSizeInternal(FileSystem, FileNode, AllocationSize, TRUE);
@@ -965,6 +1416,27 @@ static NTSTATUS Read(FSP_FILE_SYSTEM *FileSystem,
     if (EndOffset > FileNode->FileInfo.FileSize)
         EndOffset = FileNode->FileInfo.FileSize;
 
+#ifdef MEMFS_SLOWIO
+    if (SlowioReturnPending(FileSystem))
+    {
+        MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
+        try
+        {
+            InterlockedIncrement(&Memfs->SlowioThreadsRunning);
+            std::thread(SlowioReadThread,
+                FileSystem, FileNode, Buffer, Offset, EndOffset,
+                FspFileSystemGetOperationContext()->Request->Hint).
+                detach();
+            return STATUS_PENDING;
+        }
+        catch (...)
+        {
+            InterlockedDecrement(&Memfs->SlowioThreadsRunning);
+        }
+    }
+    SlowioSnooze(FileSystem);
+#endif
+
     memcpy(Buffer, (PUINT8)FileNode->FileData + Offset, (size_t)(EndOffset - Offset));
 
     *PBytesTransferred = (ULONG)(EndOffset - Offset);
@@ -1017,6 +1489,27 @@ static NTSTATUS Write(FSP_FILE_SYSTEM *FileSystem,
                 return Result;
         }
     }
+
+#ifdef MEMFS_SLOWIO
+    if (SlowioReturnPending(FileSystem))
+    {
+        MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
+        try
+        {
+            InterlockedIncrement(&Memfs->SlowioThreadsRunning);
+            std::thread(SlowioWriteThread,
+                FileSystem, FileNode, Buffer, Offset, EndOffset,
+                FspFileSystemGetOperationContext()->Request->Hint).
+                detach();
+            return STATUS_PENDING;
+        }
+        catch (...)
+        {
+            InterlockedDecrement(&Memfs->SlowioThreadsRunning);
+        }
+    }
+    SlowioSnooze(FileSystem);
+#endif
 
     memcpy((PUINT8)FileNode->FileData + Offset, Buffer, (size_t)(EndOffset - Offset));
 
@@ -1350,6 +1843,8 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM *FileSystem,
     PVOID FileNode0, PWSTR Pattern, PWSTR Marker,
     PVOID Buffer, ULONG Length, PULONG PBytesTransferred)
 {
+    assert(0 == Pattern);
+
     MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
     MEMFS_FILE_NODE *FileNode = (MEMFS_FILE_NODE *)FileNode0;
     MEMFS_FILE_NODE *ParentNode;
@@ -1385,8 +1880,70 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM *FileSystem,
         ReadDirectoryEnumFn, &Context))
         FspFileSystemAddDirInfo(0, Buffer, Length, PBytesTransferred);
 
+#ifdef MEMFS_SLOWIO
+    if (SlowioReturnPending(FileSystem))
+    {
+        try
+        {
+            InterlockedIncrement(&Memfs->SlowioThreadsRunning);
+            std::thread(SlowioReadDirectoryThread,
+                FileSystem, *PBytesTransferred,
+                FspFileSystemGetOperationContext()->Request->Hint).
+                detach();
+            return STATUS_PENDING;
+        }
+        catch (...)
+        {
+            InterlockedDecrement(&Memfs->SlowioThreadsRunning);
+        }
+    }
+    SlowioSnooze(FileSystem);
+#endif
+
     return STATUS_SUCCESS;
 }
+
+#if defined(MEMFS_DIRINFO_BY_NAME)
+static NTSTATUS GetDirInfoByName(FSP_FILE_SYSTEM *FileSystem,
+    PVOID ParentNode0, PWSTR FileName,
+    FSP_FSCTL_DIR_INFO *DirInfo)
+{
+    MEMFS *Memfs = (MEMFS *)FileSystem->UserContext;
+    MEMFS_FILE_NODE *ParentNode = (MEMFS_FILE_NODE *)ParentNode0;
+    MEMFS_FILE_NODE *FileNode;
+    WCHAR FileNameBuf[MEMFS_MAX_PATH];
+    size_t ParentLength, BSlashLength, FileNameLength;
+    WCHAR Root[2] = L"\\";
+    PWSTR Remain, Suffix;
+
+    ParentLength = wcslen(ParentNode->FileName);
+    BSlashLength = 1 < ParentLength;
+    FileNameLength = wcslen(FileName);
+    if (MEMFS_MAX_PATH <= ParentLength + BSlashLength + FileNameLength)
+        return STATUS_OBJECT_NAME_NOT_FOUND; //STATUS_OBJECT_NAME_INVALID?
+
+    memcpy(FileNameBuf, ParentNode->FileName, ParentLength * sizeof(WCHAR));
+    memcpy(FileNameBuf + ParentLength, L"\\", BSlashLength * sizeof(WCHAR));
+    memcpy(FileNameBuf + ParentLength + BSlashLength, FileName, (FileNameLength + 1) * sizeof(WCHAR));
+
+    FileName = FileNameBuf;
+
+    FileNode = MemfsFileNodeMapGet(Memfs->FileNodeMap, FileName);
+    if (0 == FileNode)
+        return STATUS_OBJECT_NAME_NOT_FOUND;
+
+    FspPathSuffix(FileNode->FileName, &Remain, &Suffix, Root);
+    FileName = Suffix;
+    FspPathCombine(FileNode->FileName, Suffix);
+
+    //memset(DirInfo->Padding, 0, sizeof DirInfo->Padding);
+    DirInfo->Size = (UINT16)(sizeof(FSP_FSCTL_DIR_INFO) + wcslen(FileName) * sizeof(WCHAR));
+    DirInfo->FileInfo = FileNode->FileInfo;
+    memcpy(DirInfo->FileNameBuf, FileName, DirInfo->Size - sizeof(FSP_FSCTL_DIR_INFO));
+
+    return STATUS_SUCCESS;
+}
+#endif
 
 #if defined(MEMFS_REPARSE_POINTS)
 static NTSTATUS ResolveReparsePoints(FSP_FILE_SYSTEM *FileSystem,
@@ -1591,14 +2148,105 @@ static NTSTATUS GetStreamInfo(FSP_FILE_SYSTEM *FileSystem,
 }
 #endif
 
+#if defined(MEMFS_CONTROL)
+static NTSTATUS Control(FSP_FILE_SYSTEM *FileSystem,
+    PVOID FileNode, UINT32 ControlCode,
+    PVOID InputBuffer, ULONG InputBufferLength,
+    PVOID OutputBuffer, ULONG OutputBufferLength, PULONG PBytesTransferred)
+{
+    /* MEMFS also supports encryption! See below :) */
+    if (CTL_CODE(0x8000 + 'M', 'R', METHOD_BUFFERED, FILE_ANY_ACCESS) == ControlCode)
+    {
+        if (OutputBufferLength != InputBufferLength)
+            return STATUS_INVALID_PARAMETER;
+
+        for (PUINT8 P = (PUINT8)InputBuffer, Q = (PUINT8)OutputBuffer, EndP = P + InputBufferLength;
+            EndP > P; P++, Q++)
+        {
+            if (('A' <= *P && *P <= 'M') || ('a' <= *P && *P <= 'm'))
+                *Q = *P + 13;
+            else
+            if (('N' <= *P && *P <= 'Z') || ('n' <= *P && *P <= 'z'))
+                *Q = *P - 13;
+            else
+                *Q = *P;
+        }
+
+        *PBytesTransferred = InputBufferLength;
+        return STATUS_SUCCESS;
+    }
+
+    return STATUS_INVALID_DEVICE_REQUEST;
+}
+#endif
+
+#if defined(MEMFS_EA)
+typedef struct _MEMFS_GET_EA_CONTEXT
+{
+    PFILE_FULL_EA_INFORMATION Ea;
+    ULONG EaLength;
+    PULONG PBytesTransferred;
+} MEMFS_GET_EA_CONTEXT;
+
+static BOOLEAN GetEaEnumFn(PFILE_FULL_EA_INFORMATION Ea, PVOID Context0)
+{
+    MEMFS_GET_EA_CONTEXT *Context = (MEMFS_GET_EA_CONTEXT *)Context0;
+
+    return FspFileSystemAddEa(Ea,
+        Context->Ea, Context->EaLength, Context->PBytesTransferred);
+}
+
+static NTSTATUS GetEa(FSP_FILE_SYSTEM *FileSystem,
+    PVOID FileNode0,
+    PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength, PULONG PBytesTransferred)
+{
+    MEMFS_FILE_NODE *FileNode = (MEMFS_FILE_NODE *)FileNode0;
+    MEMFS_GET_EA_CONTEXT Context;
+
+    Context.Ea = Ea;
+    Context.EaLength = EaLength;
+    Context.PBytesTransferred = PBytesTransferred;
+
+    if (MemfsFileNodeEnumerateEa(FileNode, GetEaEnumFn, &Context))
+        FspFileSystemAddEa(0, Ea, EaLength, PBytesTransferred);
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS SetEa(FSP_FILE_SYSTEM *FileSystem,
+    PVOID FileNode0,
+    PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength,
+    FSP_FSCTL_FILE_INFO *FileInfo)
+{
+    MEMFS_FILE_NODE *FileNode = (MEMFS_FILE_NODE *)FileNode0;
+    NTSTATUS Result;
+
+    Result = FspFileSystemEnumerateEa(FileSystem, MemfsFileNodeSetEa, FileNode, Ea, EaLength);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    MemfsFileNodeGetFileInfo(FileNode, FileInfo);
+
+    return STATUS_SUCCESS;
+}
+#endif
+
 static FSP_FILE_SYSTEM_INTERFACE MemfsInterface =
 {
     GetVolumeInfo,
     SetVolumeLabel,
     GetSecurityByName,
+#if defined(MEMFS_EA) || defined(MEMFS_WSL)
+    0,
+#else
     Create,
+#endif
     Open,
+#if defined(MEMFS_EA)
+    0,
+#else
     Overwrite,
+#endif
     Cleanup,
     Close,
     Read,
@@ -1628,6 +2276,30 @@ static FSP_FILE_SYSTEM_INTERFACE MemfsInterface =
 #else
     0,
 #endif
+#if defined(MEMFS_DIRINFO_BY_NAME)
+    GetDirInfoByName,
+#else
+    0,
+#endif
+#if defined(MEMFS_CONTROL)
+    Control,
+#else
+    0,
+#endif
+    0,
+#if defined(MEMFS_EA) || defined(MEMFS_WSL)
+    Create,
+#endif
+#if defined(MEMFS_EA)
+    Overwrite,
+    GetEa,
+    SetEa
+#else
+    0,
+    0,
+    0,
+    0,
+#endif
 };
 
 /*
@@ -1639,6 +2311,9 @@ NTSTATUS MemfsCreateFunnel(
     ULONG FileInfoTimeout,
     ULONG MaxFileNodes,
     ULONG MaxFileSize,
+    ULONG SlowioMaxDelay,
+    ULONG SlowioPercentDelay,
+    ULONG SlowioRarefyDelay,
     PWSTR FileSystemName,
     PWSTR VolumePrefix,
     PWSTR RootSddl,
@@ -1647,7 +2322,8 @@ NTSTATUS MemfsCreateFunnel(
     NTSTATUS Result;
     FSP_FSCTL_VOLUME_PARAMS VolumeParams;
     BOOLEAN CaseInsensitive = !!(Flags & MemfsCaseInsensitive);
-    PWSTR DevicePath = (Flags & MemfsNet) ?
+    BOOLEAN FlushAndPurgeOnCleanup = !!(Flags & MemfsFlushAndPurgeOnCleanup);
+    PWSTR DevicePath = MemfsNet == (Flags & MemfsDeviceMask) ?
         L"" FSP_FSCTL_NET_DEVICE_NAME : L"" FSP_FSCTL_DISK_DEVICE_NAME;
     UINT64 AllocationUnit;
     MEMFS *Memfs;
@@ -1680,6 +2356,12 @@ NTSTATUS MemfsCreateFunnel(
     AllocationUnit = MEMFS_SECTOR_SIZE * MEMFS_SECTORS_PER_ALLOCATION_UNIT;
     Memfs->MaxFileSize = (ULONG)((MaxFileSize + AllocationUnit - 1) / AllocationUnit * AllocationUnit);
 
+#ifdef MEMFS_SLOWIO
+    Memfs->SlowioMaxDelay = SlowioMaxDelay;
+    Memfs->SlowioPercentDelay = SlowioPercentDelay;
+    Memfs->SlowioRarefyDelay = SlowioRarefyDelay;
+#endif
+
     Result = MemfsFileNodeMapCreate(CaseInsensitive, &Memfs->FileNodeMap);
     if (!NT_SUCCESS(Result))
     {
@@ -1689,6 +2371,7 @@ NTSTATUS MemfsCreateFunnel(
     }
 
     memset(&VolumeParams, 0, sizeof VolumeParams);
+    VolumeParams.Version = sizeof FSP_FSCTL_VOLUME_PARAMS;
     VolumeParams.SectorSize = MEMFS_SECTOR_SIZE;
     VolumeParams.SectorsPerAllocationUnit = MEMFS_SECTORS_PER_ALLOCATION_UNIT;
     VolumeParams.VolumeCreationTime = MemfsGetSystemTime();
@@ -1704,6 +2387,23 @@ NTSTATUS MemfsCreateFunnel(
     VolumeParams.NamedStreams = 1;
 #endif
     VolumeParams.PostCleanupWhenModifiedOnly = 1;
+#if defined(MEMFS_DIRINFO_BY_NAME)
+    VolumeParams.PassQueryDirectoryFileName = 1;
+#endif
+    VolumeParams.FlushAndPurgeOnCleanup = FlushAndPurgeOnCleanup;
+#if defined(MEMFS_CONTROL)
+    VolumeParams.DeviceControl = 1;
+#endif
+#if defined(MEMFS_EA)
+    VolumeParams.ExtendedAttributes = 1;
+#endif
+#if defined(MEMFS_WSL)
+    VolumeParams.WslFeatures = 1;
+#endif
+    VolumeParams.AllowOpenInKernelMode = 1;
+#if defined(MEMFS_REJECT_EARLY_IRP)
+    VolumeParams.RejectIrpPriorToTransact0 = 1;
+#endif
     if (0 != VolumePrefix)
         wcscpy_s(VolumeParams.Prefix, sizeof VolumeParams.Prefix / sizeof(WCHAR), VolumePrefix);
     wcscpy_s(VolumeParams.FileSystemName, sizeof VolumeParams.FileSystemName / sizeof(WCHAR),
@@ -1779,12 +2479,21 @@ VOID MemfsDelete(MEMFS *Memfs)
 
 NTSTATUS MemfsStart(MEMFS *Memfs)
 {
+#ifdef MEMFS_SLOWIO
+    Memfs->SlowioThreadsRunning = 0;
+#endif
+
     return FspFileSystemStartDispatcher(Memfs->FileSystem, 0);
 }
 
 VOID MemfsStop(MEMFS *Memfs)
 {
     FspFileSystemStopDispatcher(Memfs->FileSystem);
+
+#ifdef MEMFS_SLOWIO
+    while (Memfs->SlowioThreadsRunning)
+        Sleep(1);
+#endif
 }
 
 FSP_FILE_SYSTEM *MemfsFileSystem(MEMFS *Memfs)

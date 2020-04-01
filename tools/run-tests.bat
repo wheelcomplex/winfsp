@@ -20,7 +20,7 @@ launchctl-x64 start memfs32 testnet \memfs32\test P: >nul
 launchctl-x64 start memfs-dotnet testdsk ""                 Q: >nul
 launchctl-x64 start memfs-dotnet testnet \memfs-dotnet\test R: >nul
 rem Cannot use timeout under cygwin/mintty: "Input redirection is not supported"
-waitfor 7BF47D72F6664550B03248ECFE77C7DD /t 3 2>nul
+waitfor 7BF47D72F6664550B03248ECFE77C7DD /t 5 2>nul
 cd M: >nul 2>nul || (echo === Unable to find drive M: >&2 & goto fail)
 cd N: >nul 2>nul || (echo === Unable to find drive N: >&2 & goto fail)
 cd O: >nul 2>nul || (echo === Unable to find drive O: >&2 & goto fail)
@@ -31,14 +31,17 @@ cd R: >nul 2>nul || (echo === Unable to find drive R: >&2 & goto fail)
 set dfl_tests=^
     winfsp-tests-x64 ^
     winfsp-tests-x64-case-randomize ^
+    winfsp-tests-x64-flushpurge ^
     winfsp-tests-x64-mountpoint-drive ^
     winfsp-tests-x64-mountpoint-dir ^
+    winfsp-tests-x64-mountpoint-dir-case-sensitive ^
     winfsp-tests-x64-no-traverse ^
     winfsp-tests-x64-oplock ^
     winfsp-tests-x64-external ^
     winfsp-tests-x64-external-share ^
     fsx-memfs-x64-disk ^
     fsx-memfs-x64-net ^
+    fsx-memfs-x64-slowio ^
     standby-memfs-x64-disk ^
     standby-memfs-x64-net ^
     net-use-memfs-x64 ^
@@ -47,14 +50,17 @@ set dfl_tests=^
     fscrash-x64 ^
     winfsp-tests-x86 ^
     winfsp-tests-x86-case-randomize ^
+    winfsp-tests-x86-flushpurge ^
     winfsp-tests-x86-mountpoint-drive ^
     winfsp-tests-x86-mountpoint-dir ^
+    winfsp-tests-x86-mountpoint-dir-case-sensitive ^
     winfsp-tests-x86-no-traverse ^
     winfsp-tests-x86-oplock ^
     winfsp-tests-x86-external ^
     winfsp-tests-x86-external-share ^
     fsx-memfs-x86-disk ^
     fsx-memfs-x86-net ^
+    fsx-memfs-x86-slowio ^
     standby-memfs-x86-disk ^
     standby-memfs-x86-net ^
     net-use-memfs-x86 ^
@@ -65,17 +71,37 @@ set dfl_tests=^
     winfsp-tests-dotnet-external-share ^
     fsx-memfs-dotnet-disk ^
     fsx-memfs-dotnet-net ^
+    fsx-memfs-dotnet-slowio ^
     winfstest-memfs-dotnet-disk ^
     winfstest-memfs-dotnet-net
 set opt_tests=^
     ifstest-memfs-x64-disk ^
     ifstest-memfs-x86-disk ^
     ifstest-memfs-dotnet-disk ^
+    sample-memfs-fuse3-x64 ^
+    sample-fsx-memfs-fuse3-x64 ^
+    sample-memfs-fuse3-x86 ^
+    sample-fsx-memfs-fuse3-x86 ^
+    sample-airfs-x64 ^
+    sample-airfs-x86 ^
     sample-passthrough-x64 ^
     sample-passthrough-x86 ^
     sample-passthrough-fuse-x64 ^
+    sample-fsx-passthrough-fuse-x64 ^
     sample-passthrough-fuse-x86 ^
-    sample-passthrough-dotnet
+    sample-fsx-passthrough-fuse-x86 ^
+    sample-passthrough-fuse3-x64 ^
+    sample-fsx-passthrough-fuse3-x64 ^
+    sample-passthrough-fuse3-x86 ^
+    sample-fsx-passthrough-fuse3-x86 ^
+    sample-passthrough-dotnet ^
+    compat-v1.2-memfs-x64 ^
+    compat-v1.2-memfs-x86 ^
+    compat-v1.1-passthrough-fuse-x64 ^
+    compat-v1.1-passthrough-fuse-x86 ^
+    avast-tests-x64 ^
+    avast-tests-x86 ^
+    avast-tests-dotnet
 
 set tests=
 for %%f in (%dfl_tests%) do (
@@ -135,7 +161,7 @@ launchctl-x64 stop memfs32 testnet >nul
 launchctl-x64 stop memfs-dotnet testdsk >nul
 launchctl-x64 stop memfs-dotnet testnet >nul
 rem Cannot use timeout under cygwin/mintty: "Input redirection is not supported"
-waitfor 7BF47D72F6664550B03248ECFE77C7DD /t 3 2>nul
+waitfor 7BF47D72F6664550B03248ECFE77C7DD /t 5 2>nul
 
 set /a total=testpass+testfail
 echo === Total: %testpass%/%total%
@@ -154,27 +180,37 @@ if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x64-case-randomize
-winfsp-tests-x64 --case-randomize
+winfsp-tests-x64 --case-randomize * +ea*
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:winfsp-tests-x64-flushpurge
+winfsp-tests-x64 --flush-and-purge-on-cleanup * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x64-mountpoint-drive
-winfsp-tests-x64 --mountpoint=X: --resilient
+winfsp-tests-x64 --mountpoint=X: --resilient * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x64-mountpoint-dir
-winfsp-tests-x64 --mountpoint=mymnt --case-insensitive
+winfsp-tests-x64 --mountpoint=mymnt --case-insensitive * +ea*
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:winfsp-tests-x64-mountpoint-dir-case-sensitive
+winfsp-tests-x64 --mountpoint=mymnt * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x64-no-traverse
-winfsp-tests-x64 --no-traverse
+winfsp-tests-x64 --no-traverse * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x64-oplock
-winfsp-tests-x64 --oplock=filter --resilient
+winfsp-tests-x64 --oplock=filter --resilient * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
@@ -184,40 +220,64 @@ if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x86-case-randomize
-winfsp-tests-x86 --case-randomize
+winfsp-tests-x86 --case-randomize * +ea*
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:winfsp-tests-x86-flushpurge
+winfsp-tests-x86 --flush-and-purge-on-cleanup * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x86-mountpoint-drive
-winfsp-tests-x86 --mountpoint=X: --resilient
+winfsp-tests-x86 --mountpoint=X: --resilient * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x86-mountpoint-dir
-winfsp-tests-x86 --mountpoint=mymnt --case-insensitive
+winfsp-tests-x86 --mountpoint=mymnt --case-insensitive * +ea*
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:winfsp-tests-x86-mountpoint-dir-case-sensitive
+winfsp-tests-x86 --mountpoint=mymnt * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x86-no-traverse
-winfsp-tests-x86 --no-traverse
+winfsp-tests-x86 --no-traverse * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x86-oplock
-winfsp-tests-x86 --oplock=filter --resilient
+winfsp-tests-x86 --oplock=filter --resilient * +ea*
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x64-external
 M:
-"%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --resilient
+fltmc instances -v M: | findstr aswSnx >nul
+if !ERRORLEVEL! neq 0 (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --resilient +*
+) else (
+    REM Avast present
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --resilient ^
+        -querydir_buffer_overflow_test
+)
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x64-external-share
 M:
-"%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --share=winfsp-tests-share=M:\ --resilient ^
-    -reparse_symlink*
+fltmc instances -v M: | findstr aswSnx >nul
+if !ERRORLEVEL! neq 0 (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --share=winfsp-tests-share=M:\ --resilient ^
+        -reparse_symlink*
+) else (
+    REM Avast present
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --share=winfsp-tests-share=M:\ --resilient ^
+        -reparse_symlink* -querydir_buffer_overflow_test
+)
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
@@ -263,14 +323,28 @@ exit /b 0
 
 :winfsp-tests-x86-external
 O:
-"%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x86.exe" --external --resilient
+fltmc instances -v O: | findstr aswSnx >nul
+if !ERRORLEVEL! neq 0 (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x86.exe" --external --resilient +*
+) else (
+    REM Avast present
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x86.exe" --external --resilient ^
+        -querydir_buffer_overflow_test
+)
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-x86-external-share
 O:
-"%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x86.exe" --external --share=winfsp-tests-share=O:\ --resilient ^
-    -reparse_symlink*
+fltmc instances -v O: | findstr aswSnx >nul
+if !ERRORLEVEL! neq 0 (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x86.exe" --external --share=winfsp-tests-share=O:\ --resilient ^
+        -reparse_symlink*
+) else (
+    REM Avast present
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x86.exe" --external --share=winfsp-tests-share=O:\ --resilient ^
+        -reparse_symlink* -querydir_buffer_overflow_test
+)
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
@@ -378,14 +452,28 @@ exit /b 0
 
 :winfsp-tests-dotnet-external
 Q:
-"%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --resilient
+fltmc instances -v Q: | findstr aswSnx >nul
+if !ERRORLEVEL! neq 0 (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --resilient +*
+) else (
+    REM Avast present
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --resilient ^
+        -querydir_buffer_overflow_test
+)
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
 :winfsp-tests-dotnet-external-share
 Q:
-"%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --share=winfsp-tests-share=Q:\ --resilient ^
-    -reparse_symlink*
+fltmc instances -v Q: | findstr aswSnx >nul
+if !ERRORLEVEL! neq 0 (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --share=winfsp-tests-share=Q:\ --resilient ^
+        -reparse_symlink*
+) else (
+    REM Avast present
+    "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-tests-x64.exe" --external --share=winfsp-tests-share=Q:\ --resilient ^
+        -reparse_symlink* -querydir_buffer_overflow_test
+)
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
@@ -404,6 +492,40 @@ if !ERRORLEVEL! neq 0 goto fail
 "%ProjRoot%\ext\test\fstools\src\fsx\fsx.exe" -f foo -N 5000 test xxxxxx
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
+
+:fsx-memfs-x64-slowio
+call :__run_fsx_memfs_slowio_test memfs64-slowio memfs-x64
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:fsx-memfs-x86-slowio
+call :__run_fsx_memfs_slowio_test memfs32-slowio memfs-x86
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:fsx-memfs-dotnet-slowio
+call :__run_fsx_memfs_slowio_test memfs.net-slowio memfs-dotnet-msil
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:__run_fsx_memfs_slowio_test
+set RunSampleTestExit=0
+call "%ProjRoot%\tools\fsreg" %1 "%ProjRoot%\build\VStudio\build\%Configuration%\%2.exe" "-u %%%%1 -m %%%%2 -M 50 -P 10 -R 5" "D:P(A;;RPWPLC;;;WD)"
+echo net use L: "\\%1\share"
+net use L: "\\%1\share"
+if !ERRORLEVEL! neq 0 goto fail
+echo net use ^| findstr L:
+net use | findstr L:
+pushd >nul
+cd L: >nul 2>nul || (echo Unable to find drive L: >&2 & goto fail)
+L:
+"%ProjRoot%\ext\test\fstools\src\fsx\fsx.exe" -N 5000 test xxxxxx
+if !ERRORLEVEL! neq 0 set RunSampleTestExit=1
+popd
+echo net use L: /delete
+net use L: /delete
+call "%ProjRoot%\tools\fsreg" -u %1
+exit /b !RunSampleTestExit!
 
 :winfstest-memfs-dotnet-disk
 Q:
@@ -468,6 +590,8 @@ rem FileInformation.LinkInformationTest: WinFsp does not support hard links
 rem FileInformation.StreamStandardInformationTest: test requires FileLinkInformation support (no hard links)
 call :__ifstest %1 /g FileInformation -t LinkInformationTest -t StreamStandardInformationTest /r %3
 if !ERRORLEVEL! neq 0 set IfsTestMemfsExit=1
+call :__ifstest %1 /g EaInformation
+if !ERRORLEVEL! neq 0 set IfsTestMemfsExit=1
 call :__ifstest %1 /g DirectoryInformation
 if !ERRORLEVEL! neq 0 set IfsTestMemfsExit=1
 call :__ifstest %1 /g FileLocking
@@ -506,7 +630,7 @@ set IfsTestExit=0
 (SET LF=^
 %=this line is empty=%
 )
-for /F "delims=" %%l in ('call "%ProjRoot%\tools\ifstest.bat" %* /z /v ^| findstr /n "^"') do (
+for /F "delims=" %%l in ('call "%ProjRoot%\tools\ifstest.bat" %* /v ^| findstr /n "^"') do (
     set IfsTestLine=%%l
     set IfsTestLine=!IfsTestLine:*:=!
 
@@ -555,6 +679,38 @@ for /F "delims=" %%l in ('call "%ProjRoot%\tools\ifstest.bat" %* /z /v ^| findst
 if not X!IfsTestFound!==XYES set IfsTestExit=1
 exit /b !IfsTestExit!
 
+:sample-memfs-fuse3-x64
+call :__run_sample_fuse_test memfs-fuse3 x64 memfs-fuse3-x64 winfsp-tests-x64 ^
+    "-create_fileattr_test -create_readonlydir_test -setfileinfo_test"
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-memfs-fuse3-x86
+call :__run_sample_fuse_test memfs-fuse3 x86 memfs-fuse3-x86 winfsp-tests-x86 ^
+    "-create_fileattr_test -create_readonlydir_test -setfileinfo_test"
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-fsx-memfs-fuse3-x64
+call :__run_sample_fsx_fuse_test memfs-fuse3 x64 memfs-fuse3-x64 fsx
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-fsx-memfs-fuse3-x86
+call :__run_sample_fsx_fuse_test memfs-fuse3 x86 memfs-fuse3-x86 fsx
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-airfs-x64
+call :__run_sample_disk_test airfs x64 airfs-x64 winfsp-tests-x64 NOEXCL
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-airfs-x86
+call :__run_sample_disk_test airfs x86 airfs-x86 winfsp-tests-x86 NOEXCL
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
 :sample-passthrough-x64
 call :__run_sample_test passthrough x64 passthrough-x64 winfsp-tests-x64
 if !ERRORLEVEL! neq 0 goto fail
@@ -577,7 +733,7 @@ exit /b 0
 
 :sample-passthrough-dotnet
 call :__run_sample_test passthrough-dotnet anycpu passthrough-dotnet winfsp-tests-x64 ^
-    "-create_backup_test -create_restore_test -create_namelen_test -delete_access_test"
+    "-create_backup_test -create_restore_test -create_namelen_test -getfileattr_test -delete_access_test -querydir_namelen_test"
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
 
@@ -590,6 +746,68 @@ exit /b 0
 call :__run_sample_fuse_test passthrough-fuse x86 passthrough-fuse-x86 winfsp-tests-x86
 if !ERRORLEVEL! neq 0 goto fail
 exit /b 0
+
+:sample-fsx-passthrough-fuse-x64
+call :__run_sample_fsx_fuse_test passthrough-fuse x64 passthrough-fuse-x64 fsx
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-fsx-passthrough-fuse-x86
+call :__run_sample_fsx_fuse_test passthrough-fuse x86 passthrough-fuse-x86 fsx
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-passthrough-fuse3-x64
+call :__run_sample_fuse_test passthrough-fuse3 x64 passthrough-fuse3-x64 winfsp-tests-x64 ^
+    "-create_fileattr_test -create_readonlydir_test -setfileinfo_test"
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-passthrough-fuse3-x86
+call :__run_sample_fuse_test passthrough-fuse3 x86 passthrough-fuse3-x86 winfsp-tests-x86 ^
+    "-create_fileattr_test -create_readonlydir_test -setfileinfo_test"
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-fsx-passthrough-fuse3-x64
+call :__run_sample_fsx_fuse_test passthrough-fuse3 x64 passthrough-fuse3-x64 fsx
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:sample-fsx-passthrough-fuse3-x86
+call :__run_sample_fsx_fuse_test passthrough-fuse3 x86 passthrough-fuse3-x86 fsx
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:__run_sample_disk_test
+set RunSampleTestExit=0
+call %ProjRoot%\tools\build-sample %Configuration% %2 %1 "%TMP%\%1"
+if !ERRORLEVEL! neq 0 goto fail
+mkdir "%TMP%\%1\test"
+call "%ProjRoot%\tools\fsreg" %1 "%TMP%\%1\build\%Configuration%\%3.exe" "-i -u %%%%1 -m %%%%2" "D:P(A;;RPWPLC;;;WD)"
+echo launchctl-x64 start %1 testdsk "" L:
+launchctl-x64 start %1 testdsk "" L: >nul
+waitfor 7BF47D72F6664550B03248ECFE77C7DD /t 3 2>nul
+pushd >nul
+cd L: >nul 2>nul || (echo Unable to find drive L: >&2 & goto fail)
+L:
+if X%5==XNOEXCL (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\%4.exe" ^
+        --external --resilient
+) else (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\%4.exe" ^
+        --external --resilient --case-insensitive-cmp --share-prefix="\%1\%TMP::=$%\%1\test" ^
+        -create_allocation_test -getfileinfo_name_test -rename_flipflop_test -rename_mmap_test -exec_rename_dir_test ^
+        -reparse* -stream* %~5
+)
+if !ERRORLEVEL! neq 0 set RunSampleTestExit=1
+popd
+echo launchctl-x64 stop %1 testdsk
+launchctl-x64 stop %1 testdsk >nul
+waitfor 7BF47D72F6664550B03248ECFE77C7DD /t 3 2>nul
+call "%ProjRoot%\tools\fsreg" -u %1
+rmdir /s/q "%TMP%\%1"
+exit /b !RunSampleTestExit!
 
 :__run_sample_test
 set RunSampleTestExit=0
@@ -605,10 +823,15 @@ net use | findstr L:
 pushd >nul
 cd L: >nul 2>nul || (echo Unable to find drive L: >&2 & goto fail)
 L:
-"%ProjRoot%\build\VStudio\build\%Configuration%\%4.exe" ^
-    --external --resilient --case-insensitive-cmp --share-prefix="\%1\%TMP::=$%\%1\test" ^
-    -create_allocation_test -getfileinfo_name_test -rename_flipflop_test -rename_mmap_test -exec_rename_dir_test ^
-    -reparse* -stream* %~5
+if X%5==XNOEXCL (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\%4.exe" ^
+        --external --resilient
+) else (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\%4.exe" ^
+        --external --resilient --case-insensitive-cmp --share-prefix="\%1\%TMP::=$%\%1\test" ^
+        -create_allocation_test -getfileinfo_name_test -rename_flipflop_test -rename_mmap_test -exec_rename_dir_test ^
+        -reparse* -stream* %~5
+)
 if !ERRORLEVEL! neq 0 set RunSampleTestExit=1
 popd
 echo net use L: /delete
@@ -632,10 +855,110 @@ net use | findstr L:
 pushd >nul
 cd L: >nul 2>nul || (echo Unable to find drive L: >&2 & goto fail)
 L:
-"%ProjRoot%\build\VStudio\build\%Configuration%\%4.exe" ^
+if X%5==XNOEXCL (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\%4.exe" ^
+        --external --resilient
+) else (
+    "%ProjRoot%\build\VStudio\build\%Configuration%\%4.exe" ^
+        --external --resilient --case-insensitive-cmp --share-prefix="\%1\%TMP::=$%\%1\test" ^
+        -create_allocation_test -create_notraverse_test -create_backup_test -create_restore_test -create_namelen_test ^
+        -getfileattr_test -getfileinfo_name_test -delete_access_test -delete_mmap_test -rename_flipflop_test -rename_mmap_test -setsecurity_test -querydir_namelen_test -exec_rename_dir_test ^
+        -reparse* -stream* %~5
+)
+if !ERRORLEVEL! neq 0 set RunSampleTestExit=1
+popd
+echo net use L: /delete
+net use L: /delete
+call "%ProjRoot%\tools\fsreg" -u %1
+rmdir /s/q "%TMP%\%1"
+exit /b !RunSampleTestExit!
+
+:__run_sample_fsx_fuse_test
+set RunSampleTestExit=0
+call %ProjRoot%\tools\build-sample %Configuration% %2 %1 "%TMP%\%1"
+if !ERRORLEVEL! neq 0 goto fail
+mkdir "%TMP%\%1\test"
+call "%ProjRoot%\tools\fsreg" %1 "%TMP%\%1\build\%Configuration%\%3.exe" ^
+    "-ouid=11,gid=65792 --VolumePrefix=%%%%1 %%%%2" "D:P(A;;RPWPLC;;;WD)"
+echo net use L: "\\%1\%TMP::=$%\%1\test"
+net use L: "\\%1\%TMP::=$%\%1\test"
+if !ERRORLEVEL! neq 0 goto fail
+echo net use ^| findstr L:
+net use | findstr L:
+pushd >nul
+cd L: >nul 2>nul || (echo Unable to find drive L: >&2 & goto fail)
+L:
+"%ProjRoot%\ext\test\fstools\src\fsx\%4.exe" -N 5000 test xxxxxx
+if !ERRORLEVEL! neq 0 set RunSampleTestExit=1
+popd
+echo net use L: /delete
+net use L: /delete
+call "%ProjRoot%\tools\fsreg" -u %1
+rmdir /s/q "%TMP%\%1"
+exit /b !RunSampleTestExit!
+
+:compat-v1.2-memfs-x64
+copy "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-*.dll" "%ProjRoot%\tst\compat\v1.2\memfs"
+call :__run_compat_memfs_test compat-memfs v1.2\memfs\memfs-x64 winfsp-tests-x64
+if !ERRORLEVEL! neq 0 goto fail
+del "%ProjRoot%\tst\compat\v1.2\memfs\winfsp-*.dll"
+exit /b 0
+
+:compat-v1.2-memfs-x86
+copy "%ProjRoot%\build\VStudio\build\%Configuration%\winfsp-*.dll" "%ProjRoot%\tst\compat\v1.2\memfs"
+call :__run_compat_memfs_test compat-memfs v1.2\memfs\memfs-x86 winfsp-tests-x86
+if !ERRORLEVEL! neq 0 goto fail
+del "%ProjRoot%\tst\compat\v1.2\memfs\winfsp-*.dll"
+exit /b 0
+
+:__run_compat_memfs_test
+set RunSampleTestExit=0
+call "%ProjRoot%\tools\fsreg" %1 "%ProjRoot%\tst\compat\%2.exe" ^
+    "-i -F NTFS -n 65536 -s 67108864 -u %%%%1 -m %%%%2" "D:P(A;;RPWPLC;;;WD)"
+echo net use L: "\\%1\share"
+net use L: "\\%1\share"
+if !ERRORLEVEL! neq 0 goto fail
+echo net use ^| findstr L:
+net use | findstr L:
+pushd >nul
+cd L: >nul 2>nul || (echo Unable to find drive L: >&2 & goto fail)
+L:
+"%ProjRoot%\build\VStudio\build\%Configuration%\%3.exe" ^
+    --external --resilient --share-prefix="\%1\share"
+if !ERRORLEVEL! neq 0 set RunSampleTestExit=1
+popd
+echo net use L: /delete
+net use L: /delete
+call "%ProjRoot%\tools\fsreg" -u %1
+exit /b !RunSampleTestExit!
+
+:compat-v1.1-passthrough-fuse-x64
+call :__run_compat_fuse_test passthrough-fuse v1.1\passthrough-fuse\passthrough-fuse-x64 winfsp-tests-x64
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:compat-v1.1-passthrough-fuse-x86
+call :__run_compat_fuse_test passthrough-fuse v1.1\passthrough-fuse\passthrough-fuse-x86 winfsp-tests-x86
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:__run_compat_fuse_test
+set RunSampleTestExit=0
+mkdir "%TMP%\%1\test"
+call "%ProjRoot%\tools\fsreg" %1 "%ProjRoot%\tst\compat\%2.exe" ^
+    "-ouid=11,gid=65792 --VolumePrefix=%%%%1 %%%%2" "D:P(A;;RPWPLC;;;WD)"
+echo net use L: "\\%1\%TMP::=$%\%1\test"
+net use L: "\\%1\%TMP::=$%\%1\test"
+if !ERRORLEVEL! neq 0 goto fail
+echo net use ^| findstr L:
+net use | findstr L:
+pushd >nul
+cd L: >nul 2>nul || (echo Unable to find drive L: >&2 & goto fail)
+L:
+"%ProjRoot%\build\VStudio\build\%Configuration%\%3.exe" ^
     --external --resilient --case-insensitive-cmp --share-prefix="\%1\%TMP::=$%\%1\test" ^
-    -create_allocation_test -create_notraverse_test -create_backup_test -create_restore_test -create_namelen_test ^
-    -getfileinfo_name_test -setfileinfo_test -delete_access_test -delete_mmap_test -rename_flipflop_test -rename_mmap_test -setsecurity_test -exec_rename_dir_test ^
+    -create_fileattr_test -create_readonlydir_test -create_allocation_test -create_notraverse_test -create_backup_test -create_restore_test -create_namelen_test ^
+    -getfileattr_test -getfileinfo_name_test -setfileinfo_test -delete_access_test -delete_mmap_test -rename_flipflop_test -rename_mmap_test -setsecurity_test -querydir_namelen_test -exec_rename_dir_test ^
     -reparse* -stream*
 if !ERRORLEVEL! neq 0 set RunSampleTestExit=1
 popd
@@ -644,6 +967,27 @@ net use L: /delete
 call "%ProjRoot%\tools\fsreg" -u %1
 rmdir /s/q "%TMP%\%1"
 exit /b !RunSampleTestExit!
+
+:avast-tests-x64
+call :winfsp-tests-x64-external
+if !ERRORLEVEL! neq 0 goto fail
+call :winfsp-tests-x64-external-share
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:avast-tests-x86
+call :winfsp-tests-x86-external
+if !ERRORLEVEL! neq 0 goto fail
+call :winfsp-tests-x86-external-share
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
+
+:avast-tests-dotnet
+call :winfsp-tests-dotnet-external
+if !ERRORLEVEL! neq 0 goto fail
+call :winfsp-tests-dotnet-external-share
+if !ERRORLEVEL! neq 0 goto fail
+exit /b 0
 
 :leak-test
 for /F "tokens=1,2 delims=:" %%i in ('verifier /query ^| findstr ^

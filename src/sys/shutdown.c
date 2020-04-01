@@ -1,7 +1,7 @@
 /**
  * @file sys/shutdown.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,52 +10,30 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
 
-static NTSTATUS FspFsvolShutdown(
-    PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp);
 FSP_DRIVER_DISPATCH FspShutdown;
-FSP_IOCMPL_DISPATCH FspFsvolShutdownComplete;
 
 #ifdef ALLOC_PRAGMA
-#pragma alloc_text(PAGE, FspFsvolShutdown)
-#pragma alloc_text(PAGE, FspFsvolShutdownComplete)
 #pragma alloc_text(PAGE, FspShutdown)
 #endif
-
-static NTSTATUS FspFsvolShutdown(
-    PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
-{
-    PAGED_CODE();
-
-    return STATUS_INVALID_DEVICE_REQUEST;
-}
-
-NTSTATUS FspFsvolShutdownComplete(
-    PIRP Irp, const FSP_FSCTL_TRANSACT_RSP *Response)
-{
-    FSP_ENTER_IOC(PAGED_CODE());
-
-    FSP_LEAVE_IOC("%s", "");
-}
 
 NTSTATUS FspShutdown(
     PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
     FSP_ENTER_MJ(PAGED_CODE());
 
-    switch (FspDeviceExtension(DeviceObject)->Kind)
-    {
-    case FspFsvolDeviceExtensionKind:
-        FSP_RETURN(Result = FspFsvolShutdown(DeviceObject, Irp, IrpSp));
-    default:
-        FSP_RETURN(Result = STATUS_INVALID_DEVICE_REQUEST);
-    }
+    (PVOID)IrpSp;
+    FSP_RETURN(Result = STATUS_INVALID_DEVICE_REQUEST);
 
     FSP_LEAVE_MJ("%s", "");
 }

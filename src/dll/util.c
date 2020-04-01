@@ -1,7 +1,7 @@
 /**
  * @file dll/util.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <dll/library.h>
@@ -64,6 +68,16 @@ FSP_API NTSTATUS FspCallNamedPipeSecurely(PWSTR PipeName,
     PULONG PBytesTransferred, ULONG Timeout,
     PSID Sid)
 {
+    return FspCallNamedPipeSecurelyEx(PipeName,
+        InBuffer, InBufferSize, OutBuffer, OutBufferSize, PBytesTransferred, Timeout,
+        FALSE, Sid);
+}
+
+FSP_API NTSTATUS FspCallNamedPipeSecurelyEx(PWSTR PipeName,
+    PVOID InBuffer, ULONG InBufferSize, PVOID OutBuffer, ULONG OutBufferSize,
+    PULONG PBytesTransferred, ULONG Timeout, BOOLEAN AllowImpersonation,
+    PSID Sid)
+{
     NTSTATUS Result;
     HANDLE Pipe = INVALID_HANDLE_VALUE;
     DWORD PipeMode;
@@ -71,7 +85,8 @@ FSP_API NTSTATUS FspCallNamedPipeSecurely(PWSTR PipeName,
     Pipe = CreateFileW(PipeName,
         GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING,
-        SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, 0);
+        SECURITY_SQOS_PRESENT | (AllowImpersonation ? SECURITY_IMPERSONATION : SECURITY_IDENTIFICATION),
+        0);
     if (INVALID_HANDLE_VALUE == Pipe)
     {
         if (ERROR_PIPE_BUSY != GetLastError())
@@ -85,7 +100,8 @@ FSP_API NTSTATUS FspCallNamedPipeSecurely(PWSTR PipeName,
         Pipe = CreateFileW(PipeName,
             GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING,
-            SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, 0);
+            SECURITY_SQOS_PRESENT | (AllowImpersonation ? SECURITY_IMPERSONATION : SECURITY_IDENTIFICATION),
+            0);
         if (INVALID_HANDLE_VALUE == Pipe)
         {
             Result = FspNtStatusFromWin32(GetLastError());
@@ -97,24 +113,14 @@ FSP_API NTSTATUS FspCallNamedPipeSecurely(PWSTR PipeName,
     {
         PSECURITY_DESCRIPTOR SecurityDescriptor = 0;
         PSID OwnerSid, WellKnownSid = 0;
-        DWORD SidSize, LastError;
+        DWORD LastError;
 
         /* if it is a small number treat it like a well known SID */
         if (1024 > (INT_PTR)Sid)
         {
-            SidSize = SECURITY_MAX_SID_SIZE;
-            WellKnownSid = MemAlloc(SidSize);
+            WellKnownSid = FspWksidNew((INT_PTR)Sid, &Result);
             if (0 == WellKnownSid)
-            {
-                Result = STATUS_INSUFFICIENT_RESOURCES;
                 goto sid_exit;
-            }
-
-            if (!CreateWellKnownSid((INT_PTR)Sid, 0, WellKnownSid, &SidSize))
-            {
-                Result = FspNtStatusFromWin32(GetLastError());
-                goto sid_exit;
-            }
         }
 
         LastError = GetSecurityInfo(Pipe, SE_FILE_OBJECT,

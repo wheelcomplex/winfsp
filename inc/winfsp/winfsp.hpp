@@ -2,7 +2,7 @@
  * @file winfsp/winfsp.hpp
  * WinFsp C++ Layer.
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -11,9 +11,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #ifndef WINFSP_WINFSP_HPP_INCLUDED
@@ -607,6 +611,14 @@ public:
     VOID SetPassQueryDirectoryPattern(BOOLEAN PassQueryDirectoryPattern)
     {
         _VolumeParams.PassQueryDirectoryPattern = !!PassQueryDirectoryPattern;
+    }
+    BOOLEAN FlushAndPurgeOnCleanup()
+    {
+        return _VolumeParams.FlushAndPurgeOnCleanup;
+    }
+    VOID SetFlushAndPurgeOnCleanup(BOOLEAN FlushAndPurgeOnCleanup)
+    {
+        _VolumeParams.FlushAndPurgeOnCleanup = !!FlushAndPurgeOnCleanup;
     }
     PWSTR Prefix()
     {

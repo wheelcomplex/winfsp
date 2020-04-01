@@ -1,7 +1,7 @@
 /**
  * @file sys/util.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -20,9 +24,20 @@
 NTSTATUS FspCreateGuid(GUID *Guid);
 NTSTATUS FspGetDeviceObjectPointer(PUNICODE_STRING ObjectName, ACCESS_MASK DesiredAccess,
     PULONG PFileNameIndex, PFILE_OBJECT *PFileObject, PDEVICE_OBJECT *PDeviceObject);
+NTSTATUS FspRegistryGetValue(PUNICODE_STRING Path, PUNICODE_STRING ValueName,
+    PKEY_VALUE_PARTIAL_INFORMATION ValueInformation, PULONG PValueInformationLength);
 NTSTATUS FspSendSetInformationIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
     FILE_INFORMATION_CLASS FileInformationClass, PVOID FileInformation, ULONG Length);
-static NTSTATUS FspSendSetInformationIrpCompletion(
+NTSTATUS FspSendQuerySecurityIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
+    SECURITY_INFORMATION SecurityInformation,
+    PSECURITY_DESCRIPTOR SecurityDescriptor,
+    PULONG PLength);
+NTSTATUS FspSendQueryEaIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
+    PFILE_GET_EA_INFORMATION GetEa, ULONG GetEaLength,
+    PFILE_FULL_EA_INFORMATION Ea, PULONG PEaLength);
+NTSTATUS FspSendMountmgrDeviceControlIrp(ULONG IoControlCode,
+    PVOID SystemBuffer, ULONG InputBufferLength, PULONG POutputBufferLength);
+static NTSTATUS FspSendIrpCompletion(
     PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context0);
 NTSTATUS FspBufferUserBuffer(PIRP Irp, ULONG Length, LOCK_OPERATION Operation);
 NTSTATUS FspLockUserBuffer(PIRP Irp, ULONG Length, LOCK_OPERATION Operation);
@@ -45,6 +60,14 @@ NTSTATUS FspCcFlushCache(PSECTION_OBJECT_POINTERS SectionObjectPointer,
 NTSTATUS FspQuerySecurityDescriptorInfo(SECURITY_INFORMATION SecurityInformation,
     PSECURITY_DESCRIPTOR SecurityDescriptor, PULONG PLength,
     PSECURITY_DESCRIPTOR ObjectsSecurityDescriptor);
+NTSTATUS FspEaBufferFromOriginatingProcessValidate(
+    PFILE_FULL_EA_INFORMATION Buffer,
+    ULONG Length,
+    PULONG PErrorOffset);
+NTSTATUS FspEaBufferFromFileSystemValidate(
+    PFILE_FULL_EA_INFORMATION Buffer,
+    ULONG Length,
+    PULONG PErrorOffset);
 NTSTATUS FspNotifyInitializeSync(PNOTIFY_SYNC *NotifySync);
 NTSTATUS FspNotifyFullChangeDirectory(
     PNOTIFY_SYNC NotifySync,
@@ -111,7 +134,11 @@ NTSTATUS FspIrpHookNext(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context);
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, FspCreateGuid)
 #pragma alloc_text(PAGE, FspGetDeviceObjectPointer)
+#pragma alloc_text(PAGE, FspRegistryGetValue)
 #pragma alloc_text(PAGE, FspSendSetInformationIrp)
+#pragma alloc_text(PAGE, FspSendQuerySecurityIrp)
+#pragma alloc_text(PAGE, FspSendQueryEaIrp)
+#pragma alloc_text(PAGE, FspSendMountmgrDeviceControlIrp)
 #pragma alloc_text(PAGE, FspBufferUserBuffer)
 #pragma alloc_text(PAGE, FspLockUserBuffer)
 #pragma alloc_text(PAGE, FspMapLockedPagesInUserMode)
@@ -125,6 +152,8 @@ NTSTATUS FspIrpHookNext(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context);
 #pragma alloc_text(PAGE, FspCcMdlWriteComplete)
 #pragma alloc_text(PAGE, FspCcFlushCache)
 #pragma alloc_text(PAGE, FspQuerySecurityDescriptorInfo)
+#pragma alloc_text(PAGE, FspEaBufferFromOriginatingProcessValidate)
+#pragma alloc_text(PAGE, FspEaBufferFromFileSystemValidate)
 #pragma alloc_text(PAGE, FspNotifyInitializeSync)
 #pragma alloc_text(PAGE, FspNotifyFullChangeDirectory)
 #pragma alloc_text(PAGE, FspNotifyFullReportChange)
@@ -257,11 +286,43 @@ NTSTATUS FspGetDeviceObjectPointer(PUNICODE_STRING ObjectName, ACCESS_MASK Desir
     return Result;
 }
 
+NTSTATUS FspRegistryGetValue(PUNICODE_STRING Path, PUNICODE_STRING ValueName,
+    PKEY_VALUE_PARTIAL_INFORMATION ValueInformation, PULONG PValueInformationLength)
+{
+    PAGED_CODE();
+
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Handle = 0;
+    NTSTATUS Result;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+        Path, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, 0, 0);
+
+    Result = ZwOpenKey(&Handle, KEY_QUERY_VALUE, &ObjectAttributes);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    Result = ZwQueryValueKey(Handle, ValueName,
+        KeyValuePartialInformation, ValueInformation,
+        *PValueInformationLength, PValueInformationLength);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    Result = STATUS_SUCCESS;
+        /* NOTE: also converts STATUS_BUFFER_OVERFLOW to STATUS_SUCCESS */
+
+exit:
+    if (0 != Handle)
+        ZwClose(Handle);
+
+    return Result;
+}
+
 typedef struct
 {
     IO_STATUS_BLOCK IoStatus;
     KEVENT Event;
-} FSP_SEND_SET_INFORMATION_IRP_CONTEXT;
+} FSP_SEND_IRP_CONTEXT;
 
 NTSTATUS FspSendSetInformationIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
     FILE_INFORMATION_CLASS FileInformationClass, PVOID FileInformation, ULONG Length)
@@ -275,7 +336,7 @@ NTSTATUS FspSendSetInformationIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT File
     NTSTATUS Result;
     PIRP Irp;
     PIO_STACK_LOCATION IrpSp;
-    FSP_SEND_SET_INFORMATION_IRP_CONTEXT Context;
+    FSP_SEND_IRP_CONTEXT Context;
 
     if (0 == DeviceObject)
         DeviceObject = IoGetRelatedDeviceObject(FileObject);
@@ -290,24 +351,165 @@ NTSTATUS FspSendSetInformationIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT File
     IrpSp->MajorFunction = IRP_MJ_SET_INFORMATION;
     IrpSp->FileObject = FileObject;
     IrpSp->Parameters.SetFile.FileInformationClass = FileInformationClass;
-    IrpSp->Parameters.SetFile.Length = FileInformationClass;
-
-    IoSetCompletionRoutine(Irp, FspSendSetInformationIrpCompletion, &Context, TRUE, TRUE, TRUE);
+    IrpSp->Parameters.SetFile.Length = Length;
 
     KeInitializeEvent(&Context.Event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(Irp, FspSendIrpCompletion, &Context, TRUE, TRUE, TRUE);
+
     Result = IoCallDriver(DeviceObject, Irp);
     if (STATUS_PENDING == Result)
         KeWaitForSingleObject(&Context.Event, Executive, KernelMode, FALSE, 0);
 
-    return NT_SUCCESS(Result) ? Context.IoStatus.Status : Result;
+    return Context.IoStatus.Status;
 }
 
-static NTSTATUS FspSendSetInformationIrpCompletion(
+NTSTATUS FspSendQuerySecurityIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
+    SECURITY_INFORMATION SecurityInformation,
+    PSECURITY_DESCRIPTOR SecurityDescriptor,
+    PULONG PLength)
+{
+    PAGED_CODE();
+
+    NTSTATUS Result;
+    PIRP Irp;
+    PIO_STACK_LOCATION IrpSp;
+    FSP_SEND_IRP_CONTEXT Context;
+    ULONG Length = *PLength;
+
+    *PLength = 0;
+
+    if (0 == DeviceObject)
+        DeviceObject = IoGetRelatedDeviceObject(FileObject);
+
+    Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
+    if (0 == Irp)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    Irp->RequestorMode = KernelMode;
+    Irp->AssociatedIrp.SystemBuffer = SecurityDescriptor;
+    Irp->UserBuffer = SecurityDescriptor;
+    IrpSp->MajorFunction = IRP_MJ_QUERY_SECURITY;
+    IrpSp->FileObject = FileObject;
+    IrpSp->Parameters.QuerySecurity.SecurityInformation = SecurityInformation;
+    IrpSp->Parameters.QuerySecurity.Length = Length;
+
+    KeInitializeEvent(&Context.Event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(Irp, FspSendIrpCompletion, &Context, TRUE, TRUE, TRUE);
+
+    Result = IoCallDriver(DeviceObject, Irp);
+    if (STATUS_PENDING == Result)
+        KeWaitForSingleObject(&Context.Event, Executive, KernelMode, FALSE, 0);
+
+    *PLength = (ULONG)Context.IoStatus.Information;
+    return Context.IoStatus.Status;
+}
+
+NTSTATUS FspSendQueryEaIrp(PDEVICE_OBJECT DeviceObject, PFILE_OBJECT FileObject,
+    PFILE_GET_EA_INFORMATION GetEa, ULONG GetEaLength,
+    PFILE_FULL_EA_INFORMATION Ea, PULONG PEaLength)
+{
+    PAGED_CODE();
+
+    NTSTATUS Result;
+    PIRP Irp;
+    PIO_STACK_LOCATION IrpSp;
+    FSP_SEND_IRP_CONTEXT Context;
+    ULONG EaLength = *PEaLength;
+
+    *PEaLength = 0;
+
+    if (0 == DeviceObject)
+        DeviceObject = IoGetRelatedDeviceObject(FileObject);
+
+    Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
+    if (0 == Irp)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    Irp->RequestorMode = KernelMode;
+    Irp->AssociatedIrp.SystemBuffer = Ea;
+    Irp->UserBuffer = Ea;
+    IrpSp->MajorFunction = IRP_MJ_QUERY_EA;
+    IrpSp->FileObject = FileObject;
+    IrpSp->Parameters.QueryEa.Length = EaLength;
+    IrpSp->Parameters.QueryEa.EaList = GetEa;
+    IrpSp->Parameters.QueryEa.EaListLength = GetEaLength;
+
+    KeInitializeEvent(&Context.Event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(Irp, FspSendIrpCompletion, &Context, TRUE, TRUE, TRUE);
+
+    Result = IoCallDriver(DeviceObject, Irp);
+    if (STATUS_PENDING == Result)
+        KeWaitForSingleObject(&Context.Event, Executive, KernelMode, FALSE, 0);
+
+    *PEaLength = (ULONG)Context.IoStatus.Information;
+    return Context.IoStatus.Status;
+}
+
+NTSTATUS FspSendMountmgrDeviceControlIrp(ULONG IoControlCode,
+    PVOID SystemBuffer, ULONG InputBufferLength, PULONG POutputBufferLength)
+{
+    PAGED_CODE();
+
+    ASSERT(METHOD_BUFFERED == (IoControlCode & 3));
+
+    NTSTATUS Result;
+    UNICODE_STRING DeviceName;
+    PFILE_OBJECT FileObject;
+    PDEVICE_OBJECT DeviceObject;
+    PIRP Irp;
+    PIO_STACK_LOCATION IrpSp;
+    FSP_SEND_IRP_CONTEXT Context;
+    ULONG OutputBufferLength = 0;
+
+    if (0 == POutputBufferLength)
+        POutputBufferLength = &OutputBufferLength;
+
+    RtlInitUnicodeString(&DeviceName, MOUNTMGR_DEVICE_NAME);
+    Result = IoGetDeviceObjectPointer(&DeviceName, FILE_READ_ATTRIBUTES,
+        &FileObject, &DeviceObject);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
+    if (0 == Irp)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    Irp->RequestorMode = KernelMode;
+    Irp->AssociatedIrp.SystemBuffer = SystemBuffer;
+    IrpSp->MajorFunction = IRP_MJ_DEVICE_CONTROL;
+    IrpSp->Parameters.DeviceIoControl.OutputBufferLength = *POutputBufferLength;
+    IrpSp->Parameters.DeviceIoControl.InputBufferLength = InputBufferLength;
+    IrpSp->Parameters.DeviceIoControl.IoControlCode = IoControlCode;
+
+    KeInitializeEvent(&Context.Event, NotificationEvent, FALSE);
+    IoSetCompletionRoutine(Irp, FspSendIrpCompletion, &Context, TRUE, TRUE, TRUE);
+
+    Result = IoCallDriver(DeviceObject, Irp);
+    if (STATUS_PENDING == Result)
+        KeWaitForSingleObject(&Context.Event, Executive, KernelMode, FALSE, 0);
+
+    *POutputBufferLength = (ULONG)Context.IoStatus.Information;
+    Result = Context.IoStatus.Status;
+
+exit:
+    if (0 != FileObject)
+        ObDereferenceObject(FileObject);
+
+    return Result;
+}
+
+static NTSTATUS FspSendIrpCompletion(
     PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context0)
 {
     // !PAGED_CODE();
 
-    FSP_SEND_SET_INFORMATION_IRP_CONTEXT *Context = Context0;
+    FSP_SEND_IRP_CONTEXT *Context = Context0;
 
     Context->IoStatus = Irp->IoStatus;
     KeSetEvent(&Context->Event, 1, FALSE);
@@ -572,6 +774,65 @@ NTSTATUS FspQuerySecurityDescriptorInfo(SECURITY_INFORMATION SecurityInformation
     }
 
     return STATUS_BUFFER_TOO_SMALL == Result ? STATUS_BUFFER_OVERFLOW : Result;
+}
+
+NTSTATUS FspEaBufferFromOriginatingProcessValidate(
+    PFILE_FULL_EA_INFORMATION Buffer,
+    ULONG Length,
+    PULONG PErrorOffset)
+{
+    PAGED_CODE();
+
+    NTSTATUS Result;
+
+    *PErrorOffset = 0;
+
+    Result = IoCheckEaBufferValidity(Buffer, Length, PErrorOffset);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    /* check that the EA names are valid */
+    for (PFILE_FULL_EA_INFORMATION Ea = Buffer, EaEnd = (PVOID)((PUINT8)Ea + Length);
+        EaEnd > Ea; Ea = FSP_NEXT_EA(Ea, EaEnd))
+    {
+        STRING Name;
+
+        Name.Length = Name.MaximumLength = Ea->EaNameLength;
+        Name.Buffer = Ea->EaName;
+
+        if (!FspEaNameIsValid(&Name))
+        {
+            *PErrorOffset = (ULONG)((PUINT8)Ea - (PUINT8)Buffer);
+            return STATUS_INVALID_EA_NAME;
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS FspEaBufferFromFileSystemValidate(
+    PFILE_FULL_EA_INFORMATION Buffer,
+    ULONG Length,
+    PULONG PErrorOffset)
+{
+    PAGED_CODE();
+
+    PFILE_FULL_EA_INFORMATION LastEa = 0;
+
+    *PErrorOffset = 0;
+
+    /* EA buffers from the user mode file system are allowed to have zero length */
+    if (0 == Length)
+        return STATUS_SUCCESS;
+
+    /* EA buffers from the user mode file system are allowed to end with NextEntryOffset != 0 */
+    for (PFILE_FULL_EA_INFORMATION Ea = Buffer, EaEnd = (PVOID)((PUINT8)Ea + Length);
+        EaEnd > Ea; Ea = FSP_NEXT_EA(Ea, EaEnd))
+        LastEa = Ea;
+    if (0 != LastEa)
+        LastEa->NextEntryOffset = 0;
+
+    return IoCheckEaBufferValidity(Buffer, Length, PErrorOffset);
 }
 
 NTSTATUS FspNotifyInitializeSync(PNOTIFY_SYNC *NotifySync)

@@ -1,7 +1,7 @@
 /**
  * @file dirctl-test.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <winfsp/winfsp.h>
@@ -197,6 +201,12 @@ static void querydir_dotest(ULONG Flags, PWSTR Prefix, ULONG FileInfoTimeout, UL
     ASSERT(Success);
 
     StringCbPrintfW(FilePath, sizeof FilePath, L"%s%s\\DOES-NOT-EXIST",
+        Prefix ? L"" : L"\\\\?\\GLOBALROOT", Prefix ? Prefix : memfs_volumename(memfs));
+    Handle = FindFirstFileW(FilePath, &FindData);
+    ASSERT(INVALID_HANDLE_VALUE == Handle);
+    ASSERT(ERROR_FILE_NOT_FOUND == GetLastError());
+
+    StringCbPrintfW(FilePath, sizeof FilePath, L"%s%s\\DOES-NOT-EXIST*",
         Prefix ? L"" : L"\\\\?\\GLOBALROOT", Prefix ? Prefix : memfs_volumename(memfs));
     Handle = FindFirstFileW(FilePath, &FindData);
     ASSERT(INVALID_HANDLE_VALUE == Handle);
@@ -410,6 +420,98 @@ void querydir_buffer_overflow_test(void)
     }
 }
 
+static VOID querydir_namelen_exists(PWSTR FilePath)
+{
+    HANDLE Handle;
+    WIN32_FIND_DATAW FindData;
+
+    Handle = FindFirstFileW(FilePath, &FindData);
+    ASSERT(INVALID_HANDLE_VALUE != Handle);
+    FindClose(Handle);
+}
+
+static void querydir_namelen_dotest(ULONG Flags, PWSTR Prefix, PWSTR Drive)
+{
+    /* based on create_namelen_dotest */
+
+    void *memfs = memfs_start(Flags);
+
+    WCHAR FilePath[1024];
+    PWSTR FilePathBgn, P, EndP;
+    DWORD MaxComponentLength;
+    HANDLE Handle;
+    BOOL Success;
+
+    StringCbPrintfW(FilePath, sizeof FilePath, L"%s%s\\",
+        Prefix ? L"" : L"\\\\?\\GLOBALROOT", Drive ? Drive : memfs_volumename(memfs));
+
+    Success = GetVolumeInformationW(FilePath,
+        0, 0,
+        0, &MaxComponentLength, 0,
+        0, 0);
+    ASSERT(Success);
+
+    StringCbPrintfW(FilePath, sizeof FilePath, L"%s%s\\",
+        Prefix ? L"" : L"\\\\?\\GLOBALROOT", Prefix ? Prefix : memfs_volumename(memfs));
+    FilePathBgn = FilePath + wcslen(FilePath);
+
+    for (P = FilePathBgn, EndP = P + MaxComponentLength - 1; EndP > P; P++)
+        *P = (P - FilePathBgn) % 10 + '0';
+    *P = L'\0';
+
+    Handle = CreateFileW(FilePath,
+        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, 0,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, 0);
+    ASSERT(INVALID_HANDLE_VALUE != Handle);
+    querydir_namelen_exists(FilePath);
+    Success = CloseHandle(Handle);
+    ASSERT(Success);
+
+    for (P = FilePathBgn, EndP = P + MaxComponentLength; EndP > P; P++)
+        *P = (P - FilePathBgn) % 10 + '0';
+    *P = L'\0';
+
+    Handle = CreateFileW(FilePath,
+        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, 0,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, 0);
+    ASSERT(INVALID_HANDLE_VALUE != Handle);
+    querydir_namelen_exists(FilePath);
+    Success = CloseHandle(Handle);
+    ASSERT(Success);
+
+    for (P = FilePathBgn, EndP = P + MaxComponentLength + 1; EndP > P; P++)
+        *P = (P - FilePathBgn) % 10 + '0';
+    *P = L'\0';
+
+    Handle = CreateFileW(FilePath,
+        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, 0,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, 0);
+    ASSERT(INVALID_HANDLE_VALUE == Handle);
+    ASSERT(ERROR_INVALID_NAME == GetLastError());
+
+    memfs_stop(memfs);
+}
+
+static void querydir_namelen_test(void)
+{
+    if (OptShareName || OptMountPoint)
+        return;
+
+    if (NtfsTests)
+    {
+        WCHAR DirBuf[MAX_PATH], DriveBuf[3];
+        GetTestDirectoryAndDrive(DirBuf, DriveBuf);
+        querydir_namelen_dotest(-1, DirBuf, DriveBuf);
+    }
+    if (WinFspDiskTests)
+        querydir_namelen_dotest(MemfsDisk, 0, 0);
+#if 0
+    /* This test does not work when going through the MUP! */
+    if (WinFspNetTests)
+        querydir_namelen_dotest(MemfsNet, L"\\\\memfs\\share", L"\\\\memfs\\share");
+#endif
+}
+
 static unsigned __stdcall dirnotify_dotest_thread(void *FilePath)
 {
     FspDebugLog(__FUNCTION__ ": \"%S\"\n", FilePath);
@@ -546,5 +648,7 @@ void dirctl_tests(void)
     TEST(querydir_expire_cache_test);
     if (!OptShareName)
         TEST(querydir_buffer_overflow_test);
+    if (!OptShareName && !OptMountPoint)
+        TEST(querydir_namelen_test);
     TEST(dirnotify_test);
 }

@@ -1,7 +1,7 @@
 /*
  * dotnet/Interop.cs
  *
- * Copyright 2015-2017 Bill Zissimopoulos
+ * Copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 using System;
@@ -42,10 +46,23 @@ namespace Fsp.Interop
         internal const UInt32 PostCleanupWhenModifiedOnly = 0x00000400;
         internal const UInt32 PassQueryDirectoryPattern = 0x00000800;
         internal const UInt32 AlwaysUseDoubleBuffering = 0x00001000;
+        internal const UInt32 PassQueryDirectoryFileName = 0x00002000;
+        internal const UInt32 FlushAndPurgeOnCleanup = 0x00004000;
+        internal const UInt32 DeviceControl = 0x00008000;
         internal const UInt32 UmFileContextIsUserContext2 = 0x00010000;
         internal const UInt32 UmFileContextIsFullContext = 0x00020000;
+        internal const UInt32 AllowOpenInKernelMode = 0x01000000;
+        internal const UInt32 CasePreservedExtendedAttributes = 0x02000000;
+        internal const UInt32 WslFeatures = 0x04000000;
+        internal const UInt32 RejectIrpPriorToTransact0 = 0x10000000;
         internal const int PrefixSize = 192;
         internal const int FileSystemNameSize = 16;
+
+        internal const UInt32 VolumeInfoTimeoutValid = 0x00000001;
+        internal const UInt32 DirInfoTimeoutValid = 0x00000002;
+        internal const UInt32 SecurityTimeoutValid = 0x00000004;
+        internal const UInt32 StreamInfoTimeoutValid = 0x00000008;
+        internal const UInt32 EaTimeoutValid = 0x00000010;
 
         internal UInt16 Version;
         internal UInt16 SectorSize;
@@ -60,6 +77,15 @@ namespace Fsp.Interop
         internal UInt32 Flags;
         internal unsafe fixed UInt16 Prefix[PrefixSize];
         internal unsafe fixed UInt16 FileSystemName[FileSystemNameSize];
+        internal UInt32 AdditionalFlags;
+        internal UInt32 VolumeInfoTimeout;
+        internal UInt32 DirInfoTimeout;
+        internal UInt32 SecurityTimeout;
+        internal UInt32 StreamInfoTimeout;
+        internal UInt32 EaTimeout;
+        internal UInt32 FsextControlCode;
+        internal unsafe fixed UInt32 Reserved32[1];
+        internal unsafe fixed UInt64 Reserved64[2];
 
         internal unsafe String GetPrefix()
         {
@@ -187,6 +213,28 @@ namespace Fsp.Interop
         /// Not currently implemented. Set to 0.
         /// </summary>
         public UInt32 HardLinks;
+
+        /// <summary>
+        /// The extended attribute size of the file.
+        /// </summary>
+        public UInt32 EaSize
+        {
+            get { return GetEaSize(); }
+            set { SetEaSize(value); }
+        }
+
+        internal static int EaSizeOffset =
+            (int)Marshal.OffsetOf(typeof(FileInfo), "HardLinks") + 4;
+        internal unsafe UInt32 GetEaSize()
+        {
+            fixed (FileInfo *P = &this)
+                return *(UInt32 *)((Int64)(IntPtr)P + EaSizeOffset);
+        }
+        internal unsafe void SetEaSize(UInt32 value)
+        {
+            fixed (FileInfo *P = &this)
+                *(UInt32 *)((Int64)(IntPtr)P + EaSizeOffset) = value;
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -263,6 +311,53 @@ namespace Fsp.Interop
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct FullEaInformation
+    {
+        internal const int EaNameSize = 15 * 1024;
+            /* Set this to a value smaller than 16384 with sufficient space for additional data.
+             * This should really be:
+             *     FSP_FSCTL_TRANSACT_RSP_BUFFER_SIZEMAX - FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName)
+             */
+
+        internal UInt32 NextEntryOffset;
+        internal Byte Flags;
+        internal Byte EaNameLength;
+        internal UInt16 EaValueLength;
+        internal unsafe fixed Byte EaName[EaNameSize];
+
+        internal unsafe void Set(String Name, Byte[] Value, Boolean NeedEa)
+        {
+            int NameLength = 254 < Name.Length ? 254 : Name.Length;
+            int ValueLength = EaNameSize - Name.Length - 1 < Value.Length ?
+                EaNameSize - Name.Length - 1 : Value.Length;
+
+            NextEntryOffset = 0;
+            Flags = NeedEa ? (Byte)0x80/*FILE_NEED_EA*/ : (Byte)0;
+            EaNameLength = (Byte)NameLength;
+            EaValueLength = (UInt16)ValueLength;
+
+            fixed (Byte *P = EaName)
+            {
+                int I = 0, J = 0;
+                for (; NameLength > I; I++)
+                    P[I] = (Byte)Name[I];
+                P[I++] = 0;
+                for (; ValueLength > J; J++)
+                    P[I + J] = Value[J];
+            }
+        }
+        internal static UInt32 PackedSize(String Name, Byte[] Value, Boolean NeedEa)
+        {
+            int NameLength = 254 < Name.Length ? 254 : Name.Length;
+            int ValueLength = EaNameSize - Name.Length - 1 < Value.Length ?
+                EaNameSize - Name.Length - 1 : Value.Length;
+
+            /* magic computations are courtesy of NTFS */
+            return (UInt32)(5 + NameLength + ValueLength);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct FullContext
     {
         internal UInt64 UserContext;
@@ -274,6 +369,65 @@ namespace Fsp.Interop
     {
         public IntPtr Status;
         public IntPtr Information;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct IoStatus
+    {
+        internal UInt32 Information;
+        internal UInt32 Status;
+    }
+
+    internal enum FspFsctlTransact
+    {
+        ReadKind = 5,
+        WriteKind = 6,
+        QueryDirectoryKind = 14
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    internal struct FspFsctlTransactReq
+    {
+        [FieldOffset(0)]
+        internal UInt16 Version;
+        [FieldOffset(2)]
+        internal UInt16 Size;
+        [FieldOffset(4)]
+        internal UInt32 Kind;
+        [FieldOffset(8)]
+        internal UInt64 Hint;
+
+        [FieldOffset(0)]
+        internal unsafe fixed Byte Padding[88];
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    internal struct FspFsctlTransactRsp
+    {
+        [FieldOffset(0)]
+        internal UInt16 Version;
+        [FieldOffset(2)]
+        internal UInt16 Size;
+        [FieldOffset(4)]
+        internal UInt32 Kind;
+        [FieldOffset(8)]
+        internal UInt64 Hint;
+
+        [FieldOffset(16)]
+        internal IoStatus IoStatus;
+
+        [FieldOffset(24)]
+        internal FileInfo WriteFileInfo;
+
+        [FieldOffset(0)]
+        internal unsafe fixed Byte Padding[128];
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal unsafe struct FspFileSystemOperationContext
+    {
+        internal FspFsctlTransactReq *Request;
+        internal FspFsctlTransactRsp *Response;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -450,6 +604,64 @@ namespace Fsp.Interop
                 IntPtr Buffer,
                 UInt32 Length,
                 out UInt32 PBytesTransferred);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate Int32 GetDirInfoByName(
+                IntPtr FileSystem,
+                ref FullContext FullContext,
+                [MarshalAs(UnmanagedType.LPWStr)] String FileName,
+                out DirInfo DirInfo);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate Int32 Control(
+                IntPtr FileSystem,
+                ref FullContext FullContext,
+                UInt32 ControlCode,
+                IntPtr InputBuffer, UInt32 InputBufferLength,
+                IntPtr OutputBuffer, UInt32 OutputBufferLength,
+                out UInt32 PBytesTransferred);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate Int32 SetDelete(
+                IntPtr FileSystem,
+                ref FullContext FullContext,
+                [MarshalAs(UnmanagedType.LPWStr)] String FileName,
+                [MarshalAs(UnmanagedType.U1)] Boolean DeleteFile);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate Int32 CreateEx(
+                IntPtr FileSystem,
+                [MarshalAs(UnmanagedType.LPWStr)] String FileName,
+                UInt32 CreateOptions,
+                UInt32 GrantedAccess,
+                UInt32 FileAttributes,
+                IntPtr SecurityDescriptor,
+                UInt64 AllocationSize,
+                IntPtr ExtraBuffer,
+                UInt32 ExtraLength,
+                [MarshalAs(UnmanagedType.U1)] Boolean ExtraBufferIsReparsePoint,
+                ref FullContext FullContext,
+                ref OpenFileInfo OpenFileInfo);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate Int32 OverwriteEx(
+                IntPtr FileSystem,
+                ref FullContext FullContext,
+                UInt32 FileAttributes,
+                [MarshalAs(UnmanagedType.U1)] Boolean ReplaceFileAttributes,
+                UInt64 AllocationSize,
+                IntPtr Ea,
+                UInt32 EaLength,
+                out FileInfo FileInfo);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate Int32 GetEa(
+                IntPtr FileSystem,
+                ref FullContext FullContext,
+                IntPtr Ea,
+                UInt32 EaLength,
+                out UInt32 PBytesTransferred);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate Int32 SetEa(
+                IntPtr FileSystem,
+                ref FullContext FullContext,
+                IntPtr Ea,
+                UInt32 EaLength,
+                out FileInfo FileInfo);
         }
 
         internal static int Size = IntPtr.Size * 64;
@@ -478,7 +690,14 @@ namespace Fsp.Interop
         internal Proto.SetReparsePoint SetReparsePoint;
         internal Proto.DeleteReparsePoint DeleteReparsePoint;
         internal Proto.GetStreamInfo GetStreamInfo;
-        /* NTSTATUS (*Reserved[40])(); */
+        internal Proto.GetDirInfoByName GetDirInfoByName;
+        internal Proto.Control Control;
+        internal Proto.SetDelete SetDelete;
+        internal Proto.CreateEx CreateEx;
+        internal Proto.OverwriteEx OverwriteEx;
+        internal Proto.GetEa GetEa;
+        internal Proto.SetEa SetEa;
+        /* NTSTATUS (*Reserved[33])(); */
     }
 
     [SuppressUnmanagedCodeSecurity]
@@ -520,6 +739,12 @@ namespace Fsp.Interop
             internal delegate Int32 FspFileSystemStopDispatcher(
                 IntPtr FileSystem);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate void FspFileSystemSendResponse(
+                IntPtr FileSystem,
+                ref FspFsctlTransactRsp Response);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal unsafe delegate FspFileSystemOperationContext *FspFileSystemGetOperationContext();
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             internal delegate IntPtr FspFileSystemMountPointF(
                 IntPtr FileSystem);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -530,6 +755,8 @@ namespace Fsp.Interop
             internal delegate void FspFileSystemSetDebugLogF(
                 IntPtr FileSystem,
                 UInt32 DebugLog);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            internal delegate UInt32 FspFileSystemOperationProcessIdF();
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             [return: MarshalAs(UnmanagedType.U1)]
             internal delegate Boolean FspFileSystemAddDirInfo(
@@ -568,6 +795,13 @@ namespace Fsp.Interop
                 IntPtr StreamInfo,
                 IntPtr Buffer,
                 UInt32 Length,
+                out UInt32 PBytesTransferred);
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+            [return: MarshalAs(UnmanagedType.U1)]
+            internal delegate Boolean FspFileSystemAddEa(
+                IntPtr SingleEa,
+                IntPtr Ea,
+                UInt32 EaLength,
                 out UInt32 PBytesTransferred);
             [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
             [return: MarshalAs(UnmanagedType.U1)]
@@ -695,14 +929,18 @@ namespace Fsp.Interop
         internal static Proto.FspFileSystemRemoveMountPoint FspFileSystemRemoveMountPoint;
         internal static Proto.FspFileSystemStartDispatcher FspFileSystemStartDispatcher;
         internal static Proto.FspFileSystemStopDispatcher FspFileSystemStopDispatcher;
+        internal static Proto.FspFileSystemSendResponse FspFileSystemSendResponse;
+        internal static Proto.FspFileSystemGetOperationContext FspFileSystemGetOperationContext;
         internal static Proto.FspFileSystemMountPointF FspFileSystemMountPoint;
         internal static Proto.FspFileSystemSetOperationGuardStrategyF FspFileSystemSetOperationGuardStrategy;
         internal static Proto.FspFileSystemSetDebugLogF FspFileSystemSetDebugLog;
+        internal static Proto.FspFileSystemOperationProcessIdF FspFileSystemOperationProcessId;
         internal static Proto.FspFileSystemAddDirInfo _FspFileSystemAddDirInfo;
         internal static Proto.FspFileSystemFindReparsePoint FspFileSystemFindReparsePoint;
         internal static Proto.FspFileSystemResolveReparsePoints FspFileSystemResolveReparsePoints;
         internal static Proto.FspFileSystemCanReplaceReparsePoint _FspFileSystemCanReplaceReparsePoint;
         internal static Proto.FspFileSystemAddStreamInfo _FspFileSystemAddStreamInfo;
+        internal static Proto.FspFileSystemAddEa _FspFileSystemAddEa;
         internal static Proto.FspFileSystemAcquireDirectoryBuffer FspFileSystemAcquireDirectoryBuffer;
         internal static Proto.FspFileSystemFillDirectoryBuffer FspFileSystemFillDirectoryBuffer;
         internal static Proto.FspFileSystemReleaseDirectoryBuffer FspFileSystemReleaseDirectoryBuffer;
@@ -739,6 +977,10 @@ namespace Fsp.Interop
             else
                 return _FspFileSystemSetMountPointEx(FileSystem, MountPoint, IntPtr.Zero);
         }
+        internal static unsafe UInt64 FspFileSystemGetOperationRequestHint()
+        {
+            return FspFileSystemGetOperationContext()->Request->Hint;
+        }
         internal static unsafe Boolean FspFileSystemAddDirInfo(
             ref DirInfo DirInfo,
             IntPtr Buffer,
@@ -770,6 +1012,62 @@ namespace Fsp.Interop
             out UInt32 PBytesTransferred)
         {
             return _FspFileSystemAddStreamInfo(IntPtr.Zero, Buffer, Length, out PBytesTransferred);
+        }
+
+        internal delegate Int32 EnumerateEa(
+            Object FileNode,
+            Object FileDesc,
+            ref Object Context,
+            String EaName,
+            Byte[] EaValue,
+            Boolean NeedEa);
+        internal static unsafe Int32 FspFileSystemEnumerateEa(
+            Object FileNode,
+            Object FileDesc,
+            EnumerateEa EnumerateEa,
+            IntPtr Ea,
+            UInt32 EaLength)
+        {
+            Object Context = null;
+            FullEaInformation *P = (FullEaInformation *)Ea;
+            FullEaInformation *EndP = (FullEaInformation *)(Ea.ToInt64() + EaLength);
+            Int32 Result;
+            Result = 0/*STATUS_SUCCESS*/;
+            for (; EndP > P;
+                P = 0 != P->NextEntryOffset ?
+                    (FullEaInformation *)(((IntPtr)P).ToInt64() + P->NextEntryOffset) :
+                    EndP)
+            {
+                String EaName = Marshal.PtrToStringAnsi((IntPtr)P->EaName, P->EaNameLength);
+                Byte[] EaValue = null;
+                if (0 != P->EaValueLength)
+                {
+                    EaValue = new Byte[P->EaValueLength];
+                    Marshal.Copy((IntPtr)(((IntPtr)P->EaName).ToInt64() + P->EaNameLength + 1),
+                        EaValue, 0, P->EaValueLength);
+                }
+                Boolean NeedEa = 0 != (0x80/*FILE_NEED_EA*/ & P->Flags);
+                Result = EnumerateEa(FileNode, FileDesc, ref Context, EaName, EaValue, NeedEa);
+                if (0 > Result)
+                    break;
+            }
+            return Result;
+        }
+        internal static unsafe Boolean FspFileSystemAddEa(
+            ref FullEaInformation EaInfo,
+            IntPtr Buffer,
+            UInt32 Length,
+            out UInt32 PBytesTransferred)
+        {
+            fixed (FullEaInformation *P = &EaInfo)
+                return _FspFileSystemAddEa((IntPtr)P, Buffer, Length, out PBytesTransferred);
+        }
+        internal static unsafe Boolean FspFileSystemEndEa(
+            IntPtr Buffer,
+            UInt32 Length,
+            out UInt32 PBytesTransferred)
+        {
+            return _FspFileSystemAddEa(IntPtr.Zero, Buffer, Length, out PBytesTransferred);
         }
 
         internal unsafe static Object GetUserContext(
@@ -895,6 +1193,26 @@ namespace Fsp.Interop
                     return SecurityDescriptorBytes;
                 }
         }
+        internal unsafe static Int32 ModifySecurityDescriptorEx(
+            Byte[] SecurityDescriptorBytes,
+            UInt32 SecurityInformation,
+            Byte[] ModificationDescriptorBytes,
+            ref Byte[] ModifiedDescriptorBytes)
+        {
+            fixed (Byte *S = SecurityDescriptorBytes)
+                fixed (Byte *M = ModificationDescriptorBytes)
+                {
+                    IntPtr SecurityDescriptor;
+                    Int32 Result = FspSetSecurityDescriptor(
+                        (IntPtr)S, SecurityInformation, (IntPtr)M, out SecurityDescriptor);
+                    if (0 > Result)
+                        return Result;
+                    SecurityDescriptorBytes = MakeSecurityDescriptor(SecurityDescriptor);
+                    FspDeleteSecurityDescriptor(SecurityDescriptor, _FspSetSecurityDescriptorPtr);
+                    ModifiedDescriptorBytes = SecurityDescriptorBytes;
+                    return 0/*STATUS_SUCCESS*/;
+                }
+        }
 
         internal unsafe static Int32 CopyReparsePoint(
             Byte[] ReparseData,
@@ -959,6 +1277,13 @@ namespace Fsp.Interop
             return 0/*STATUS_SUCCESS*/;
         }
 
+        internal static Version GetVersion()
+        {
+            UInt32 Version = 0;
+            FspVersion(out Version);
+            return new System.Version((Int32)Version >> 16, (Int32)Version & 0xFFFF);
+        }
+
         /* initialization */
         private static IntPtr LoadDll()
         {
@@ -1004,14 +1329,18 @@ namespace Fsp.Interop
             FspFileSystemRemoveMountPoint = GetEntryPoint<Proto.FspFileSystemRemoveMountPoint>(Module);
             FspFileSystemStartDispatcher = GetEntryPoint<Proto.FspFileSystemStartDispatcher>(Module);
             FspFileSystemStopDispatcher = GetEntryPoint<Proto.FspFileSystemStopDispatcher>(Module);
+            FspFileSystemSendResponse = GetEntryPoint<Proto.FspFileSystemSendResponse>(Module);
+            FspFileSystemGetOperationContext = GetEntryPoint<Proto.FspFileSystemGetOperationContext>(Module);
             FspFileSystemMountPoint = GetEntryPoint<Proto.FspFileSystemMountPointF>(Module);
             FspFileSystemSetOperationGuardStrategy = GetEntryPoint<Proto.FspFileSystemSetOperationGuardStrategyF>(Module);
             FspFileSystemSetDebugLog = GetEntryPoint<Proto.FspFileSystemSetDebugLogF>(Module);
+            FspFileSystemOperationProcessId = GetEntryPoint<Proto.FspFileSystemOperationProcessIdF>(Module);
             _FspFileSystemAddDirInfo = GetEntryPoint<Proto.FspFileSystemAddDirInfo>(Module);
             FspFileSystemFindReparsePoint = GetEntryPoint<Proto.FspFileSystemFindReparsePoint>(Module);
             FspFileSystemResolveReparsePoints = GetEntryPoint<Proto.FspFileSystemResolveReparsePoints>(Module);
             _FspFileSystemCanReplaceReparsePoint = GetEntryPoint<Proto.FspFileSystemCanReplaceReparsePoint>(Module);
             _FspFileSystemAddStreamInfo = GetEntryPoint<Proto.FspFileSystemAddStreamInfo>(Module);
+            _FspFileSystemAddEa = GetEntryPoint<Proto.FspFileSystemAddEa>(Module);
             FspFileSystemAcquireDirectoryBuffer = GetEntryPoint<Proto.FspFileSystemAcquireDirectoryBuffer>(Module);
             FspFileSystemFillDirectoryBuffer = GetEntryPoint<Proto.FspFileSystemFillDirectoryBuffer>(Module);
             FspFileSystemReleaseDirectoryBuffer = GetEntryPoint<Proto.FspFileSystemReleaseDirectoryBuffer>(Module);

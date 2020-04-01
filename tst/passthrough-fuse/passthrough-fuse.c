@@ -1,7 +1,7 @@
 /**
  * @file passthrough-fuse.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <errno.h>
@@ -30,6 +34,8 @@
 #include <unistd.h>
 #endif
 
+#define PTFS_UTIMENS
+
 #define FSNAME                          "passthrough"
 #define PROGNAME                        "passthrough-fuse"
 
@@ -39,8 +45,8 @@
 #define fi_fh(fi, MASK)                 ((fi)->fh & (MASK))
 #define fi_setfh(fi, FH, MASK)          ((fi)->fh = (intptr_t)(FH) | (MASK))
 #define fi_fd(fi)                       (fi_fh(fi, fi_dirbit) ? \
-    dirfd((DIR *)fi_fh(fi, ~fi_dirbit)) : (int)fi_fh(fi, ~fi_dirbit))
-#define fi_dirp(fi)                     ((DIR *)fi_fh(fi, ~fi_dirbit))
+    dirfd((DIR *)(intptr_t)fi_fh(fi, ~fi_dirbit)) : (int)fi_fh(fi, ~fi_dirbit))
+#define fi_dirp(fi)                     ((DIR *)(intptr_t)fi_fh(fi, ~fi_dirbit))
 #define fi_setfd(fi, fd)                (fi_setfh(fi, fd, 0))
 #define fi_setdirp(fi, dirp)            (fi_setfh(fi, dirp, fi_dirbit))
 
@@ -112,12 +118,14 @@ static int ptfs_truncate(const char *path, fuse_off_t size)
     return -1 != truncate(path, size) ? 0 : -errno;
 }
 
+#if !defined(PTFS_UTIMENS)
 static int ptfs_utime(const char *path, struct fuse_utimbuf *timbuf)
 {
     ptfs_impl_fullpath(path);
 
     return -1 != utime(path, timbuf) ? 0 : -errno;
 }
+#endif
 
 static int ptfs_open(const char *path, struct fuse_file_info *fi)
 {
@@ -167,6 +175,36 @@ static int ptfs_fsync(const char *path, int datasync, struct fuse_file_info *fi)
     return -1 != fsync(fd) ? 0 : -errno;
 }
 
+static int ptfs_setxattr(const char *path, const char *name, const char *value, size_t size, int flags)
+{
+    ptfs_impl_fullpath(path);
+
+    return -1 != lsetxattr(path, name, value, size, flags) ? 0 : -errno;
+}
+
+static int ptfs_getxattr(const char *path, const char *name, char *value, size_t size)
+{
+    ptfs_impl_fullpath(path);
+
+    int nb;
+    return -1 != (nb = lgetxattr(path, name, value, size)) ? nb : -errno;
+}
+
+static int ptfs_listxattr(const char *path, char *namebuf, size_t size)
+{
+    ptfs_impl_fullpath(path);
+
+    int nb;
+    return -1 != (nb = llistxattr(path, namebuf, size)) ? nb : -errno;
+}
+
+static int ptfs_removexattr(const char *path, const char *name)
+{
+    ptfs_impl_fullpath(path);
+
+    return -1 != lremovexattr(path, name) ? 0 : -errno;
+}
+
 static int ptfs_opendir(const char *path, struct fuse_file_info *fi)
 {
     ptfs_impl_fullpath(path);
@@ -212,6 +250,10 @@ static void *ptfs_init(struct fuse_conn_info *conn)
     conn->want |= (conn->capable & FSP_FUSE_CAP_READDIR_PLUS);
 #endif
 
+#if defined(FSP_FUSE_USE_STAT_EX) && defined(FSP_FUSE_CAP_STAT_EX)
+    conn->want |= (conn->capable & FSP_FUSE_CAP_STAT_EX);
+#endif
+
 #if defined(FSP_FUSE_CAP_CASE_INSENSITIVE)
     conn->want |= (conn->capable & FSP_FUSE_CAP_CASE_INSENSITIVE);
 #endif
@@ -242,43 +284,72 @@ static int ptfs_fgetattr(const char *path, struct fuse_stat *stbuf, struct fuse_
     return -1 != fstat(fd, stbuf) ? 0 : -errno;
 }
 
+#if defined(PTFS_UTIMENS)
+static int ptfs_utimens(const char *path, const struct fuse_timespec tv[2])
+{
+    ptfs_impl_fullpath(path);
+
+    return -1 != utimensat(AT_FDCWD, path, tv, AT_SYMLINK_NOFOLLOW) ? 0 : -errno;
+}
+#endif
+
+#if defined(_WIN64) || defined(_WIN32)
+static int ptfs_setcrtime(const char *path, const struct fuse_timespec *tv)
+{
+    ptfs_impl_fullpath(path);
+
+    return -1 != setcrtime(path, tv) ? 0 : -errno;
+}
+#endif
+
+#if defined(FSP_FUSE_USE_STAT_EX)
+static int ptfs_chflags(const char *path, uint32_t flags)
+{
+    ptfs_impl_fullpath(path);
+
+    return -1 != lchflags(path, flags) ? 0 : -errno;
+}
+#endif
+
 static struct fuse_operations ptfs_ops =
 {
-    ptfs_getattr,
-    0, //getdir
-    0, //readlink
-    0, //mknod
-    ptfs_mkdir,
-    ptfs_unlink,
-    ptfs_rmdir,
-    0, //symlink
-    ptfs_rename,
-    0, //link
-    ptfs_chmod,
-    ptfs_chown,
-    ptfs_truncate,
-    ptfs_utime,
-    ptfs_open,
-    ptfs_read,
-    ptfs_write,
-    ptfs_statfs,
-    0, //flush
-    ptfs_release,
-    ptfs_fsync,
-    0, //setxattr
-    0, //getxattr
-    0, //listxattr
-    0, //removexattr
-    ptfs_opendir,
-    ptfs_readdir,
-    ptfs_releasedir,
-    0, //fsyncdir
-    ptfs_init,
-    0, //destroy
-    0, //access
-    ptfs_create,
-    ptfs_ftruncate,
-    ptfs_fgetattr,
+    .getattr = ptfs_getattr,
+    .mkdir = ptfs_mkdir,
+    .unlink = ptfs_unlink,
+    .rmdir = ptfs_rmdir,
+    .rename = ptfs_rename,
+    .chmod = ptfs_chmod,
+    .chown = ptfs_chown,
+    .truncate = ptfs_truncate,
+#if !defined(PTFS_UTIMENS)
+    .utime = ptfs_utime,
+#endif
+    .open = ptfs_open,
+    .read = ptfs_read,
+    .write = ptfs_write,
+    .statfs = ptfs_statfs,
+    .release = ptfs_release,
+    .fsync = ptfs_fsync,
+    .setxattr = ptfs_setxattr,
+    .getxattr = ptfs_getxattr,
+    .listxattr = ptfs_listxattr,
+    .removexattr = ptfs_removexattr,
+    .opendir = ptfs_opendir,
+    .readdir = ptfs_readdir,
+    .releasedir = ptfs_releasedir,
+    .init = ptfs_init,
+    .create = ptfs_create,
+    .ftruncate = ptfs_ftruncate,
+    .fgetattr = ptfs_fgetattr,
+#if defined(PTFS_UTIMENS)
+    .utimens = ptfs_utimens,
+#endif
+#if defined(_WIN64) || defined(_WIN32)
+    .setcrtime = ptfs_setcrtime,
+#endif
+#if defined(FSP_FUSE_USE_STAT_EX)
+    .chflags = ptfs_chflags,
+#endif
 };
 
 static void usage(void)

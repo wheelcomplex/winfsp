@@ -1,7 +1,7 @@
 /**
  * @file sys/volinfo.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -22,6 +26,9 @@ static NTSTATUS FspFsvolQueryFsAttributeInformation(
 static NTSTATUS FspFsvolQueryFsDeviceInformation(
     PDEVICE_OBJECT FsvolDeviceObject, PUINT8 *PBuffer, PUINT8 BufferEnd);
 static NTSTATUS FspFsvolQueryFsFullSizeInformation(
+    PDEVICE_OBJECT FsvolDeviceObject, PUINT8 *PBuffer, PUINT8 BufferEnd,
+    const FSP_FSCTL_VOLUME_INFO *VolumeInfo);
+static NTSTATUS FspFsvolQueryFsSectorSizeInformation(
     PDEVICE_OBJECT FsvolDeviceObject, PUINT8 *PBuffer, PUINT8 BufferEnd,
     const FSP_FSCTL_VOLUME_INFO *VolumeInfo);
 static NTSTATUS FspFsvolQueryFsSizeInformation(
@@ -46,6 +53,7 @@ FSP_DRIVER_DISPATCH FspSetVolumeInformation;
 #pragma alloc_text(PAGE, FspFsvolQueryFsAttributeInformation)
 #pragma alloc_text(PAGE, FspFsvolQueryFsDeviceInformation)
 #pragma alloc_text(PAGE, FspFsvolQueryFsFullSizeInformation)
+#pragma alloc_text(PAGE, FspFsvolQueryFsSectorSizeInformation)
 #pragma alloc_text(PAGE, FspFsvolQueryFsSizeInformation)
 #pragma alloc_text(PAGE, FspFsvolQueryFsVolumeInformation)
 #pragma alloc_text(PAGE, FspFsvolQueryVolumeInformation)
@@ -92,7 +100,7 @@ static NTSTATUS FspFsvolQueryFsAttributeInformation(
         (FsvolDeviceExtension->VolumeParams.ReparsePoints ? FILE_SUPPORTS_REPARSE_POINTS : 0) |
         (FsvolDeviceExtension->VolumeParams.NamedStreams ? FILE_NAMED_STREAMS : 0) |
         //(FsvolDeviceExtension->VolumeParams.HardLinks ? FILE_SUPPORTS_HARD_LINKS : 0) |
-        //(FsvolDeviceExtension->VolumeParams.ExtendedAttributes ? FILE_SUPPORTS_EXTENDED_ATTRIBUTES : 0) |
+        (FsvolDeviceExtension->VolumeParams.ExtendedAttributes ? FILE_SUPPORTS_EXTENDED_ATTRIBUTES : 0) |
         (FsvolDeviceExtension->VolumeParams.ReadOnlyVolume ? FILE_READ_ONLY_VOLUME : 0);
     Info->MaximumComponentNameLength = FsvolDeviceExtension->VolumeParams.MaxComponentLength;
 
@@ -182,6 +190,35 @@ static NTSTATUS FspFsvolQueryFsFullSizeInformation(
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS FspFsvolQueryFsSectorSizeInformation(
+    PDEVICE_OBJECT FsvolDeviceObject, PUINT8 *PBuffer, PUINT8 BufferEnd,
+    const FSP_FSCTL_VOLUME_INFO *VolumeInfo)
+{
+    PAGED_CODE();
+
+    if (*PBuffer + sizeof(FILE_FS_SECTOR_SIZE_INFORMATION) > BufferEnd)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension = FspFsvolDeviceExtension(FsvolDeviceObject);
+    PFILE_FS_SECTOR_SIZE_INFORMATION Info = (PFILE_FS_SECTOR_SIZE_INFORMATION)*PBuffer;
+
+    Info->LogicalBytesPerSector =
+        Info->PhysicalBytesPerSectorForAtomicity =
+        Info->PhysicalBytesPerSectorForPerformance =
+        Info->FileSystemEffectivePhysicalBytesPerSectorForAtomicity =
+            FsvolDeviceExtension->VolumeParams.SectorSize;
+    Info->Flags =
+        SSINFO_FLAGS_ALIGNED_DEVICE |
+        SSINFO_FLAGS_PARTITION_ALIGNED_ON_DEVICE |
+        SSINFO_FLAGS_NO_SEEK_PENALTY;
+    Info->ByteOffsetForSectorAlignment = 0;
+    Info->ByteOffsetForPartitionAlignment = 0;
+
+    *PBuffer += sizeof(FILE_FS_SECTOR_SIZE_INFORMATION);
+
+    return STATUS_SUCCESS;
+}
+
 static NTSTATUS FspFsvolQueryFsSizeInformation(
     PDEVICE_OBJECT FsvolDeviceObject, PUINT8 *PBuffer, PUINT8 BufferEnd,
     const FSP_FSCTL_VOLUME_INFO *VolumeInfo)
@@ -249,9 +286,14 @@ static NTSTATUS FspFsvolQueryVolumeInformation(
 {
     PAGED_CODE();
 
+#if defined(FSP_CFG_REJECT_EARLY_IRP)
+    if (!FspFsvolDeviceReadyToAcceptIrp(FsvolDeviceObject))
+        return STATUS_CANCELLED;
+#endif
+
     NTSTATUS Result;
     PUINT8 Buffer = Irp->AssociatedIrp.SystemBuffer;
-    PUINT8 BufferEnd = Buffer + IrpSp->Parameters.QueryFile.Length;
+    PUINT8 BufferEnd = Buffer + IrpSp->Parameters.QueryVolume.Length;
 
     switch (IrpSp->Parameters.QueryVolume.FsInformationClass)
     {
@@ -263,6 +305,9 @@ static NTSTATUS FspFsvolQueryVolumeInformation(
         break;
     case FileFsFullSizeInformation:
         Result = FspFsvolQueryFsFullSizeInformation(FsvolDeviceObject, &Buffer, BufferEnd, 0);
+        break;
+    case FileFsSectorSizeInformation:
+        Result = FspFsvolQueryFsSectorSizeInformation(FsvolDeviceObject, &Buffer, BufferEnd, 0);
         break;
     case FileFsSizeInformation:
         Result = FspFsvolQueryFsSizeInformation(FsvolDeviceObject, &Buffer, BufferEnd, 0);
@@ -306,7 +351,7 @@ NTSTATUS FspFsvolQueryVolumeInformationComplete(
 
     PDEVICE_OBJECT FsvolDeviceObject = IrpSp->DeviceObject;
     PUINT8 Buffer = Irp->AssociatedIrp.SystemBuffer;
-    PUINT8 BufferEnd = Buffer + IrpSp->Parameters.QueryFile.Length;
+    PUINT8 BufferEnd = Buffer + IrpSp->Parameters.QueryVolume.Length;
 
     FspFsvolDeviceSetVolumeInfo(FsvolDeviceObject, &Response->Rsp.QueryVolumeInformation.VolumeInfo);
 
@@ -373,6 +418,11 @@ static NTSTATUS FspFsvolSetVolumeInformation(
     PDEVICE_OBJECT FsvolDeviceObject, PIRP Irp, PIO_STACK_LOCATION IrpSp)
 {
     PAGED_CODE();
+
+#if defined(FSP_CFG_REJECT_EARLY_IRP)
+    if (!FspFsvolDeviceReadyToAcceptIrp(FsvolDeviceObject))
+        return STATUS_CANCELLED;
+#endif
 
     NTSTATUS Result;
     FS_INFORMATION_CLASS FsInformationClass = IrpSp->Parameters.SetVolume.FsInformationClass;

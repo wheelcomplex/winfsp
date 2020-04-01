@@ -2,7 +2,7 @@
  * @file fuse/winfsp_fuse.h
  * WinFsp FUSE compatible API.
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -11,9 +11,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #ifndef FUSE_WINFSP_FUSE_H_INCLUDED
@@ -53,6 +57,17 @@ extern "C" {
 #endif
 #endif
 
+#define FSP_FUSE_DEVICE_TYPE            (0x8000 | 'W' | 'F' * 0x100) /* DeviceIoControl -> ioctl */
+#define FSP_FUSE_CTLCODE_FROM_IOCTL(cmd)\
+    (FSP_FUSE_DEVICE_TYPE << 16) | (((cmd) & 0x0fff) << 2)
+#define FSP_FUSE_IOCTL(cmd, isiz, osiz) \
+    (                                   \
+        (((osiz) != 0) << 31) |         \
+        (((isiz) != 0) << 30) |         \
+        (((isiz) | (osiz)) << 16) |     \
+        (cmd)                           \
+    )
+
 /*
  * FUSE uses a number of types (notably: struct stat) that are OS specific.
  * Furthermore there are sometimes multiple definitions of the same type even
@@ -64,6 +79,27 @@ extern "C" {
  * to be compatible with the equivalent Cygwin types as we want WinFsp-FUSE
  * to be usable from Cygwin.
  */
+
+#define FSP_FUSE_STAT_FIELD_DEFN        \
+    fuse_dev_t st_dev;                  \
+    fuse_ino_t st_ino;                  \
+    fuse_mode_t st_mode;                \
+    fuse_nlink_t st_nlink;              \
+    fuse_uid_t st_uid;                  \
+    fuse_gid_t st_gid;                  \
+    fuse_dev_t st_rdev;                 \
+    fuse_off_t st_size;                 \
+    struct fuse_timespec st_atim;       \
+    struct fuse_timespec st_mtim;       \
+    struct fuse_timespec st_ctim;       \
+    fuse_blksize_t st_blksize;          \
+    fuse_blkcnt_t st_blocks;            \
+    struct fuse_timespec st_birthtim;
+#define FSP_FUSE_STAT_EX_FIELD_DEFN     \
+    FSP_FUSE_STAT_FIELD_DEFN            \
+    uint32_t st_flags;                  \
+    uint32_t st_reserved32[3];          \
+    uint64_t st_reserved64[2];
 
 #if defined(_WIN64) || defined(_WIN32)
 
@@ -111,23 +147,17 @@ struct fuse_timespec
 };
 #endif
 
+#if !defined(FSP_FUSE_USE_STAT_EX)
 struct fuse_stat
 {
-    fuse_dev_t st_dev;
-    fuse_ino_t st_ino;
-    fuse_mode_t st_mode;
-    fuse_nlink_t st_nlink;
-    fuse_uid_t st_uid;
-    fuse_gid_t st_gid;
-    fuse_dev_t st_rdev;
-    fuse_off_t st_size;
-    struct fuse_timespec st_atim;
-    struct fuse_timespec st_mtim;
-    struct fuse_timespec st_ctim;
-    fuse_blksize_t st_blksize;
-    fuse_blkcnt_t st_blocks;
-    struct fuse_timespec st_birthtim;
+    FSP_FUSE_STAT_FIELD_DEFN
 };
+#else
+struct fuse_stat
+{
+    FSP_FUSE_STAT_EX_FIELD_DEFN
+};
+#endif
 
 #if defined(_WIN64)
 struct fuse_statvfs
@@ -222,7 +252,14 @@ struct fuse_flock
 #define fuse_utimbuf                    utimbuf
 #define fuse_timespec                   timespec
 
+#if !defined(FSP_FUSE_USE_STAT_EX)
 #define fuse_stat                       stat
+#else
+struct fuse_stat
+{
+    FSP_FUSE_STAT_EX_FIELD_DEFN
+};
+#endif
 #define fuse_statvfs                    statvfs
 #define fuse_flock                      flock
 
@@ -245,6 +282,11 @@ struct fuse_flock
 #else
 #error unsupported environment
 #endif
+
+struct fuse_stat_ex
+{
+    FSP_FUSE_STAT_EX_FIELD_DEFN
+};
 
 struct fsp_fuse_env
 {
@@ -318,7 +360,10 @@ static inline int fsp_fuse_set_signal_handlers(void *se)
 
     static sigset_t sigmask;
     static pthread_t sigthr;
-    struct sigaction oldsa, newsa = { 0 };
+    struct sigaction oldsa, newsa;
+
+    // memset instead of initializer to avoid GCC -Wmissing-field-initializers warning
+    memset(&newsa, 0, sizeof newsa);
 
     if (0 != se)
     {
@@ -362,7 +407,7 @@ static inline int fsp_fuse_set_signal_handlers(void *se)
 static inline char *fsp_fuse_conv_to_win_path(const char *path)
 {
     void *cygwin_create_path(unsigned, const void *);
-    return cygwin_create_path(
+    return (char *)cygwin_create_path(
         0/*CCP_POSIX_TO_WIN_A*/ | 0x100/*CCP_RELATIVE*/,
         path);
 }

@@ -1,7 +1,7 @@
 /**
  * @file dll/library.h
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #ifndef WINFSP_DLL_LIBRARY_H_INCLUDED
@@ -20,8 +24,11 @@
 
 #define WINFSP_DLL_INTERNAL
 #include <winfsp/winfsp.h>
-#include <shared/minimal.h>
+#include <winfsp/launch.h>
+#include <shared/um/minimal.h>
 #include <strsafe.h>
+
+#include <shared/ku/config.h>
 
 #define LIBRARY_NAME                    "WinFsp"
 
@@ -31,13 +38,18 @@
     FspDebugLog("[U] " LIBRARY_NAME "!" __FUNCTION__ ": " fmt "\n", __VA_ARGS__)
 #define DEBUGLOGSD(fmt, SD)             \
     FspDebugLogSD("[U] " LIBRARY_NAME "!" __FUNCTION__ ": " fmt "\n", SD)
+#define DEBUGLOGSID(fmt, Sid)           \
+    FspDebugLogSid("[U] " LIBRARY_NAME "!" __FUNCTION__ ": " fmt "\n", Sid)
 #else
 #define DEBUGLOG(fmt, ...)              ((void)0)
 #define DEBUGLOGSD(fmt, SD)             ((void)0)
+#define DEBUGLOGSID(fmt, Sid)           ((void)0)
 #endif
 
+VOID FspWksidFinalize(BOOLEAN Dynamic);
 VOID FspPosixFinalize(BOOLEAN Dynamic);
 VOID FspEventLogFinalize(BOOLEAN Dynamic);
+VOID FspFileSystemFinalize(BOOLEAN Dynamic);
 VOID FspServiceFinalize(BOOLEAN Dynamic);
 VOID fsp_fuse_finalize(BOOLEAN Dynamic);
 VOID fsp_fuse_finalize_thread(VOID);
@@ -48,6 +60,9 @@ NTSTATUS FspNpRegister(VOID);
 NTSTATUS FspNpUnregister(VOID);
 NTSTATUS FspEventLogRegister(VOID);
 NTSTATUS FspEventLogUnregister(VOID);
+
+PSID FspWksidNew(WELL_KNOWN_SID_TYPE WellKnownSidType, PNTSTATUS PResult);
+PSID FspWksidGet(WELL_KNOWN_SID_TYPE WellKnownSidType);
 
 PWSTR FspDiagIdent(VOID);
 
@@ -78,5 +93,23 @@ static inline BOOLEAN FspPathIsDrive(PWSTR FileName)
         ) &&
         L':' == FileName[1] && L'\0' == FileName[2];
 }
+static inline BOOLEAN FspPathIsMountmgrMountPoint(PWSTR FileName)
+{
+    return
+        (
+            L'\\' == FileName[0] &&
+            L'\\' == FileName[1] &&
+            (L'?' == FileName[2] || L'.' == FileName[2]) &&
+            L'\\' == FileName[3]
+        ) &&
+        (
+            (L'A' <= FileName[4] && FileName[4] <= L'Z') ||
+            (L'a' <= FileName[4] && FileName[4] <= L'z')
+        ) &&
+        L':' == FileName[5];
+}
+
+#define FSP_NEXT_EA(Ea, EaEnd)          \
+    (0 != (Ea)->NextEntryOffset ? (PVOID)((PUINT8)(Ea) + (Ea)->NextEntryOffset) : (EaEnd))
 
 #endif

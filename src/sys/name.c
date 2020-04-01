@@ -1,7 +1,7 @@
 /**
  * @file sys/name.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -20,6 +24,7 @@
 BOOLEAN FspFileNameIsValid(PUNICODE_STRING Path, ULONG MaxComponentLength,
     PUNICODE_STRING StreamPart, PULONG StreamType);
 BOOLEAN FspFileNameIsValidPattern(PUNICODE_STRING Pattern, ULONG MaxComponentLength);
+BOOLEAN FspEaNameIsValid(PSTRING Name);
 VOID FspFileNameSuffix(PUNICODE_STRING Path, PUNICODE_STRING Remain, PUNICODE_STRING Suffix);
 NTSTATUS FspFileNameInExpression(
     PUNICODE_STRING Expression,
@@ -31,6 +36,7 @@ NTSTATUS FspFileNameInExpression(
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(PAGE, FspFileNameIsValid)
 #pragma alloc_text(PAGE, FspFileNameIsValidPattern)
+#pragma alloc_text(PAGE, FspEaNameIsValid)
 #pragma alloc_text(PAGE, FspFileNameSuffix)
 #pragma alloc_text(PAGE, FspFileNameInExpression)
 #endif
@@ -183,6 +189,37 @@ BOOLEAN FspFileNameIsValidPattern(PUNICODE_STRING Path, ULONG MaxComponentLength
     /* path component cannot be longer than MaxComponentLength */
     if ((ULONG)(PathPtr - ComponentPtr) > MaxComponentLength)
         return FALSE;
+
+    return TRUE;
+}
+
+BOOLEAN FspEaNameIsValid(PSTRING Name)
+{
+    PAGED_CODE();
+
+    /* see FastFat's FatIsEaNameValid */
+
+    if (0 == Name->Length || Name->Length > 254)
+        return FALSE;
+
+    PSTR NameEnd, NamePtr;
+    CHAR Char;
+
+    NamePtr = Name->Buffer;
+    NameEnd = NamePtr + Name->Length;
+
+    while (NameEnd > NamePtr)
+    {
+        Char = *NamePtr;
+
+        if (FsRtlIsLeadDbcsCharacter(Char))
+            NamePtr++;
+        else
+        if (!FsRtlIsAnsiCharacterLegalFat(Char, FALSE))
+            return FALSE;
+
+        NamePtr++;
+    }
 
     return TRUE;
 }

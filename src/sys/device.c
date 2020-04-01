@@ -1,7 +1,7 @@
 /**
  * @file sys/device.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -63,6 +67,8 @@ VOID FspFsvolDeviceGetVolumeInfo(PDEVICE_OBJECT DeviceObject, FSP_FSCTL_VOLUME_I
 BOOLEAN FspFsvolDeviceTryGetVolumeInfo(PDEVICE_OBJECT DeviceObject, FSP_FSCTL_VOLUME_INFO *VolumeInfo);
 VOID FspFsvolDeviceSetVolumeInfo(PDEVICE_OBJECT DeviceObject, const FSP_FSCTL_VOLUME_INFO *VolumeInfo);
 VOID FspFsvolDeviceInvalidateVolumeInfo(PDEVICE_OBJECT DeviceObject);
+static NTSTATUS FspFsmupDeviceInit(PDEVICE_OBJECT DeviceObject);
+static VOID FspFsmupDeviceFini(PDEVICE_OBJECT DeviceObject);
 NTSTATUS FspDeviceCopyList(
     PDEVICE_OBJECT **PDeviceObjects, PULONG PDeviceObjectCount);
 VOID FspDeviceDeleteList(
@@ -94,6 +100,8 @@ VOID FspDeviceDeleteAll(VOID);
 #pragma alloc_text(PAGE, FspFsvolDeviceCompareContextByName)
 #pragma alloc_text(PAGE, FspFsvolDeviceAllocateContextByName)
 #pragma alloc_text(PAGE, FspFsvolDeviceFreeContextByName)
+#pragma alloc_text(PAGE, FspFsmupDeviceInit)
+#pragma alloc_text(PAGE, FspFsmupDeviceFini)
 #pragma alloc_text(PAGE, FspDeviceCopyList)
 #pragma alloc_text(PAGE, FspDeviceDeleteList)
 #pragma alloc_text(PAGE, FspDeviceDeleteAll)
@@ -119,6 +127,11 @@ NTSTATUS FspDeviceCreateSecure(UINT32 Kind, ULONG ExtraSize,
         DeviceExtensionSize = sizeof(FSP_FSVOL_DEVICE_EXTENSION);
         break;
     case FspFsvrtDeviceExtensionKind:
+        DeviceExtensionSize = sizeof(FSP_FSVRT_DEVICE_EXTENSION);
+        break;
+    case FspFsmupDeviceExtensionKind:
+        DeviceExtensionSize = sizeof(FSP_FSMUP_DEVICE_EXTENSION);
+        break;
     case FspFsctlDeviceExtensionKind:
         DeviceExtensionSize = sizeof(FSP_DEVICE_EXTENSION);
         break;
@@ -174,6 +187,11 @@ NTSTATUS FspDeviceInitialize(PDEVICE_OBJECT DeviceObject)
         Result = FspFsvolDeviceInit(DeviceObject);
         break;
     case FspFsvrtDeviceExtensionKind:
+        Result = STATUS_SUCCESS;
+        break;
+    case FspFsmupDeviceExtensionKind:
+        Result = FspFsmupDeviceInit(DeviceObject);
+        break;
     case FspFsctlDeviceExtensionKind:
         Result = STATUS_SUCCESS;
         break;
@@ -200,6 +218,10 @@ VOID FspDeviceDelete(PDEVICE_OBJECT DeviceObject)
         FspFsvolDeviceFini(DeviceObject);
         break;
     case FspFsvrtDeviceExtensionKind:
+        break;
+    case FspFsmupDeviceExtensionKind:
+        FspFsmupDeviceFini(DeviceObject);
+        break;
     case FspFsctlDeviceExtensionKind:
         break;
     default:
@@ -300,13 +322,30 @@ static NTSTATUS FspFsvolDeviceInit(PDEVICE_OBJECT DeviceObject)
     NTSTATUS Result;
     FSP_FSVOL_DEVICE_EXTENSION *FsvolDeviceExtension = FspFsvolDeviceExtension(DeviceObject);
     LARGE_INTEGER IrpTimeout;
-    LARGE_INTEGER SecurityTimeout, DirInfoTimeout, StreamInfoTimeout;
+    LARGE_INTEGER SecurityTimeout, DirInfoTimeout, StreamInfoTimeout, EaTimeout;
 
     /*
      * Volume device initialization is a mess, because of the different ways of
      * creating/initializing different resources. So we will use some bits just
      * to track what has been initialized!
      */
+
+    /* initialize any fsext provider */
+    if (0 != FsvolDeviceExtension->VolumeParams.FsextControlCode)
+    {
+        FSP_FSEXT_PROVIDER *Provider = FspFsextProvider(
+            FsvolDeviceExtension->VolumeParams.FsextControlCode, 0);
+        if (0 != Provider)
+        {
+            Result = Provider->DeviceInit(DeviceObject, &FsvolDeviceExtension->VolumeParams);
+            if (!NT_SUCCESS(Result))
+                return Result;
+            FsvolDeviceExtension->Provider = Provider;
+            FsvolDeviceExtension->InitDoneFsext = 1;
+        }
+        else
+            return STATUS_OBJECT_NAME_NOT_FOUND;
+    }
 
     /* is there a virtual disk? */
     if (0 != FsvolDeviceExtension->FsvrtDeviceObject)
@@ -333,7 +372,7 @@ static NTSTATUS FspFsvolDeviceInit(PDEVICE_OBJECT DeviceObject)
     FsvolDeviceExtension->InitDoneIoq = 1;
 
     /* create our security meta cache */
-    SecurityTimeout.QuadPart = FspTimeoutFromMillis(FsvolDeviceExtension->VolumeParams.FileInfoTimeout);
+    SecurityTimeout.QuadPart = FspTimeoutFromMillis(FsvolDeviceExtension->VolumeParams.SecurityTimeout);
         /* convert millis to nanos */
     Result = FspMetaCacheCreate(
         FspFsvolDeviceSecurityCacheCapacity, FspFsvolDeviceSecurityCacheItemSizeMax, &SecurityTimeout,
@@ -343,7 +382,7 @@ static NTSTATUS FspFsvolDeviceInit(PDEVICE_OBJECT DeviceObject)
     FsvolDeviceExtension->InitDoneSec = 1;
 
     /* create our directory meta cache */
-    DirInfoTimeout.QuadPart = FspTimeoutFromMillis(FsvolDeviceExtension->VolumeParams.FileInfoTimeout);
+    DirInfoTimeout.QuadPart = FspTimeoutFromMillis(FsvolDeviceExtension->VolumeParams.DirInfoTimeout);
         /* convert millis to nanos */
     Result = FspMetaCacheCreate(
         FspFsvolDeviceDirInfoCacheCapacity, FspFsvolDeviceDirInfoCacheItemSizeMax, &DirInfoTimeout,
@@ -353,7 +392,7 @@ static NTSTATUS FspFsvolDeviceInit(PDEVICE_OBJECT DeviceObject)
     FsvolDeviceExtension->InitDoneDir = 1;
 
     /* create our stream info meta cache */
-    StreamInfoTimeout.QuadPart = FspTimeoutFromMillis(FsvolDeviceExtension->VolumeParams.FileInfoTimeout);
+    StreamInfoTimeout.QuadPart = FspTimeoutFromMillis(FsvolDeviceExtension->VolumeParams.StreamInfoTimeout);
         /* convert millis to nanos */
     Result = FspMetaCacheCreate(
         FspFsvolDeviceStreamInfoCacheCapacity, FspFsvolDeviceStreamInfoCacheItemSizeMax, &StreamInfoTimeout,
@@ -361,6 +400,16 @@ static NTSTATUS FspFsvolDeviceInit(PDEVICE_OBJECT DeviceObject)
     if (!NT_SUCCESS(Result))
         return Result;
     FsvolDeviceExtension->InitDoneStrm = 1;
+
+    /* create our EA meta cache */
+    EaTimeout.QuadPart = FspTimeoutFromMillis(FsvolDeviceExtension->VolumeParams.EaTimeout);
+        /* convert millis to nanos */
+    Result = FspMetaCacheCreate(
+        FspFsvolDeviceEaCacheCapacity, FspFsvolDeviceEaCacheItemSizeMax, &EaTimeout,
+        &FsvolDeviceExtension->EaCache);
+    if (!NT_SUCCESS(Result))
+        return Result;
+    FsvolDeviceExtension->InitDoneEa = 1;
 
     /* initialize the FSRTL Notify mechanism */
     Result = FspNotifyInitializeSync(&FsvolDeviceExtension->NotifySync);
@@ -432,6 +481,10 @@ static VOID FspFsvolDeviceFini(PDEVICE_OBJECT DeviceObject)
         FspNotifyUninitializeSync(&FsvolDeviceExtension->NotifySync);
     }
 
+    /* delete the EA meta cache */
+    if (FsvolDeviceExtension->InitDoneEa)
+        FspMetaCacheDelete(FsvolDeviceExtension->EaCache);
+
     /* delete the stream info meta cache */
     if (FsvolDeviceExtension->InitDoneStrm)
         FspMetaCacheDelete(FsvolDeviceExtension->StreamInfoCache);
@@ -468,6 +521,13 @@ static VOID FspFsvolDeviceFini(PDEVICE_OBJECT DeviceObject)
         /* free the spare VPB if we still have it */
         if (0 != FsvolDeviceExtension->SwapVpb)
             FspFreeExternal(FsvolDeviceExtension->SwapVpb);
+    }
+
+    /* finalize any fsext provider */
+    if (FsvolDeviceExtension->InitDoneFsext)
+    {
+        if (0 != FsvolDeviceExtension->Provider)
+            FsvolDeviceExtension->Provider->DeviceFini(DeviceObject);
     }
 }
 
@@ -515,6 +575,9 @@ static VOID FspFsvolDeviceExpirationRoutine(PVOID Context)
     FspMetaCacheInvalidateExpired(FsvolDeviceExtension->SecurityCache, InterruptTime);
     FspMetaCacheInvalidateExpired(FsvolDeviceExtension->DirInfoCache, InterruptTime);
     FspMetaCacheInvalidateExpired(FsvolDeviceExtension->StreamInfoCache, InterruptTime);
+    /* run any fsext provider expiration routine */
+    if (0 != FsvolDeviceExtension->Provider)
+        FsvolDeviceExtension->Provider->DeviceExpirationRoutine(DeviceObject, InterruptTime);
     FspIoqRemoveExpired(FsvolDeviceExtension->Ioq, InterruptTime);
 
     KeAcquireSpinLock(&FsvolDeviceExtension->ExpirationLock, &Irql);
@@ -860,7 +923,7 @@ VOID FspFsvolDeviceSetVolumeInfo(PDEVICE_OBJECT DeviceObject, const FSP_FSCTL_VO
     KeAcquireSpinLock(&FsvolDeviceExtension->InfoSpinLock, &Irql);
     FsvolDeviceExtension->VolumeInfo = VolumeInfoNp;
     FsvolDeviceExtension->InfoExpirationTime = FspExpirationTimeFromMillis(
-        FsvolDeviceExtension->VolumeParams.FileInfoTimeout);
+        FsvolDeviceExtension->VolumeParams.VolumeInfoTimeout);
     KeReleaseSpinLock(&FsvolDeviceExtension->InfoSpinLock, Irql);
 }
 
@@ -874,6 +937,39 @@ VOID FspFsvolDeviceInvalidateVolumeInfo(PDEVICE_OBJECT DeviceObject)
     KeAcquireSpinLock(&FsvolDeviceExtension->InfoSpinLock, &Irql);
     FsvolDeviceExtension->InfoExpirationTime = 0;
     KeReleaseSpinLock(&FsvolDeviceExtension->InfoSpinLock, Irql);
+}
+
+static NTSTATUS FspFsmupDeviceInit(PDEVICE_OBJECT DeviceObject)
+{
+    PAGED_CODE();
+
+    FSP_FSMUP_DEVICE_EXTENSION *FsmupDeviceExtension = FspFsmupDeviceExtension(DeviceObject);
+
+    /* initialize our prefix table */
+    ExInitializeResourceLite(&FsmupDeviceExtension->PrefixTableResource);
+    RtlInitializeUnicodePrefix(&FsmupDeviceExtension->PrefixTable);
+    RtlInitializeUnicodePrefix(&FsmupDeviceExtension->ClassTable);
+    FsmupDeviceExtension->InitDonePfxTab = 1;
+
+    return STATUS_SUCCESS;
+}
+
+static VOID FspFsmupDeviceFini(PDEVICE_OBJECT DeviceObject)
+{
+    PAGED_CODE();
+
+    FSP_FSMUP_DEVICE_EXTENSION *FsmupDeviceExtension = FspFsmupDeviceExtension(DeviceObject);
+
+    if (FsmupDeviceExtension->InitDonePfxTab)
+    {
+        /*
+         * Normally we would have to finalize our prefix table. This is not necessary as all
+         * prefixes will be gone if this code ever gets reached.
+         */
+        ASSERT(0 == RtlNextUnicodePrefix(&FsmupDeviceExtension->PrefixTable, TRUE));
+        ASSERT(0 == RtlNextUnicodePrefix(&FsmupDeviceExtension->ClassTable, TRUE));
+        ExDeleteResourceLite(&FsmupDeviceExtension->PrefixTableResource);
+    }
 }
 
 NTSTATUS FspDeviceCopyList(

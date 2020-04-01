@@ -1,7 +1,7 @@
 /**
  * @file dll/np.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,15 +10,21 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <dll/library.h>
-#include <launcher/launcher.h>
 #include <npapi.h>
 #include <wincred.h>
+
+#define _NTDEF_
+#include <ntsecapi.h>
 
 #define FSP_NP_NAME                     LIBRARY_NAME ".Np"
 #define FSP_NP_TYPE                     ' spF'  /* pick a value hopefully not in use */
@@ -34,6 +40,12 @@
  * Define the following macro to include support for the credential manager.
  */
 #define FSP_NP_CREDENTIAL_MANAGER
+
+/*
+ * Define the following macro to register ourselves as the first network provider.
+ * Otherwise we will be registered as the last network provider.
+ */
+#define FSP_NP_ORDER_FIRST
 
 enum
 {
@@ -147,7 +159,7 @@ static inline BOOLEAN FspNpParseRemoteName(PWSTR RemoteName,
     return TRUE;
 }
 
-static inline BOOLEAN FspNpParseUserName(PWSTR RemoteName,
+static inline BOOLEAN FspNpParseRemoteUserName(PWSTR RemoteName,
     PWSTR UserName, ULONG UserNameSize/* in chars */)
 {
     PWSTR ClassName, InstanceName, P;
@@ -168,39 +180,19 @@ static inline BOOLEAN FspNpParseUserName(PWSTR RemoteName,
     return FALSE;
 }
 
-static inline DWORD FspNpCallLauncherPipe(PWSTR PipeBuf, ULONG SendSize, ULONG RecvSize)
+static inline DWORD FspNpCallLauncherPipe(
+    WCHAR Command, ULONG Argc, PWSTR *Argv, ULONG *Argl,
+    PWSTR Buffer, PULONG PSize,
+    BOOLEAN AllowImpersonation)
 {
-    DWORD NpResult;
     NTSTATUS Result;
-    DWORD BytesTransferred;
+    ULONG ErrorCode;
 
-    Result = FspCallNamedPipeSecurely(L"" LAUNCHER_PIPE_NAME, PipeBuf, SendSize, PipeBuf, RecvSize,
-        &BytesTransferred, NMPWAIT_USE_DEFAULT_WAIT, LAUNCHER_PIPE_OWNER);
-
-    if (!NT_SUCCESS(Result))
-        NpResult = WN_NO_NETWORK;
-    else if (sizeof(WCHAR) > BytesTransferred)
-        NpResult = WN_NO_NETWORK;
-    else if (LauncherSuccess == PipeBuf[0])
-        NpResult = WN_SUCCESS;
-    else if (LauncherFailure == PipeBuf[0])
-    {
-        NpResult = 0;
-        for (PWSTR P = PipeBuf + 1, EndP = PipeBuf + BytesTransferred / sizeof(WCHAR); EndP > P; P++)
-        {
-            if (L'0' > *P || *P > L'9')
-                break;
-
-            NpResult = 10 * NpResult + (*P - L'0');
-        }
-
-        if (0 == NpResult)
-            NpResult = WN_NO_NETWORK;
-    }
-    else 
-        NpResult = WN_NO_NETWORK;
-
-    return NpResult;
+    Result = FspLaunchCallLauncherPipeEx(Command, Argc, Argv, Argl, Buffer, PSize, AllowImpersonation,
+        &ErrorCode);
+    return !NT_SUCCESS(Result) ?
+        WN_NO_NETWORK :
+        (ERROR_BROKEN_PIPE == ErrorCode ? WN_NO_NETWORK : ErrorCode);
 }
 
 static NTSTATUS FspNpGetVolumeList(
@@ -264,16 +256,65 @@ static WCHAR FspNpGetDriveLetter(PDWORD PLogicalDrives, PWSTR VolumeName)
     return 0;
 }
 
-static DWORD FspNpGetCredentialsKind(PWSTR RemoteName, PDWORD PCredentialsKind)
+static NTSTATUS FspNpGetAuthPackage(PWSTR AuthPackageName, PULONG PAuthPackage)
 {
-    HKEY RegKey = 0;
-    DWORD NpResult, RegSize;
-    DWORD Credentials;
+    HANDLE LsaHandle;
+    BOOLEAN LsaHandleValid = FALSE;
+    CHAR LsaAuthPackageNameBuf[127]; /* "The package name must not exceed 127 bytes in length." */
+    LSA_STRING LsaAuthPackageName;
+    ULONG AuthPackage;
+    NTSTATUS Result;
+
+    *PAuthPackage = 0;
+
+    Result = LsaConnectUntrusted(&LsaHandle);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+    LsaHandleValid = TRUE;
+
+    LsaAuthPackageName.MaximumLength = sizeof LsaAuthPackageNameBuf;
+    LsaAuthPackageName.Buffer = LsaAuthPackageNameBuf;
+    LsaAuthPackageName.Length = WideCharToMultiByte(CP_UTF8, 0,
+        AuthPackageName, lstrlenW(AuthPackageName),
+        LsaAuthPackageNameBuf, sizeof LsaAuthPackageNameBuf,
+        0, 0);
+    if (0 == LsaAuthPackageName.Length)
+    {
+        Result = FspNtStatusFromWin32(GetLastError());
+        goto exit;
+    }
+
+    Result = LsaLookupAuthenticationPackage(LsaHandle, &LsaAuthPackageName, &AuthPackage);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+
+    *PAuthPackage = AuthPackage;
+    Result = STATUS_SUCCESS;
+
+exit:
+    if (LsaHandleValid)
+        LsaDeregisterLogonProcess(LsaHandle);
+
+    return Result;
+}
+
+static DWORD FspNpGetRemoteInfo(PWSTR RemoteName,
+    PDWORD PAuthPackage, PDWORD PCredentialsKind, PBOOLEAN PAllowImpersonation)
+{
     PWSTR ClassName, InstanceName;
     ULONG ClassNameLen, InstanceNameLen;
     WCHAR ClassNameBuf[sizeof(((FSP_FSCTL_VOLUME_PARAMS *)0)->Prefix) / sizeof(WCHAR)];
+    FSP_LAUNCH_REG_RECORD *Record;
+    NTSTATUS Result;
 
-    *PCredentialsKind = FSP_NP_CREDENTIALS_NONE;
+    if (0 != PAuthPackage)
+        *PAuthPackage = 0;
+
+    if (0 != PCredentialsKind)
+        *PCredentialsKind = FSP_NP_CREDENTIALS_NONE;
+
+    if (0 != PAllowImpersonation)
+        *PAllowImpersonation = FALSE;
 
     if (!FspNpParseRemoteName(RemoteName,
         &ClassName, &ClassNameLen, &InstanceName, &InstanceNameLen))
@@ -284,39 +325,48 @@ static DWORD FspNpGetCredentialsKind(PWSTR RemoteName, PDWORD PCredentialsKind)
     memcpy(ClassNameBuf, ClassName, ClassNameLen * sizeof(WCHAR));
     ClassNameBuf[ClassNameLen] = '\0';
 
-    NpResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"" LAUNCHER_REGKEY,
-        0, LAUNCHER_REGKEY_WOW64 | KEY_READ, &RegKey);
-    if (ERROR_SUCCESS != NpResult)
-        goto exit;
+    Result = FspLaunchRegGetRecord(ClassNameBuf, L"" FSP_NP_NAME, &Record);
+    if (!NT_SUCCESS(Result))
+        return WN_NO_NETWORK;
 
-    RegSize = sizeof Credentials;
-    Credentials = 0; /* default is NO credentials */
-    NpResult = RegGetValueW(RegKey, ClassNameBuf, L"Credentials", RRF_RT_REG_DWORD, 0,
-        &Credentials, &RegSize);
-    if (ERROR_SUCCESS != NpResult && ERROR_FILE_NOT_FOUND != NpResult)
-        goto exit;
-
-    switch (Credentials)
+    if (0 != PAuthPackage)
     {
-    case FSP_NP_CREDENTIALS_NONE:
-    case FSP_NP_CREDENTIALS_PASSWORD:
-    case FSP_NP_CREDENTIALS_USERPASS:
-        *PCredentialsKind = Credentials;
-        break;
+        if (0 != Record->AuthPackage)
+        {
+            ULONG AuthPackage = 0;
+
+            Result = FspNpGetAuthPackage(Record->AuthPackage, &AuthPackage);
+            if (!NT_SUCCESS(Result))
+                return WN_NO_NETWORK;
+
+            *PAuthPackage = AuthPackage + 1;            /* ensure non-0 (Negotiate AuthPackage == 0) */
+        }
+        else if (0 != Record->AuthPackageId)
+            *PAuthPackage = Record->AuthPackageId + 1;  /* ensure non-0 (Negotiate AuthPackage == 0) */
     }
 
-    NpResult = ERROR_SUCCESS;
+    if (0 != PCredentialsKind)
+        switch (Record->Credentials)
+        {
+        case FSP_NP_CREDENTIALS_NONE:
+        case FSP_NP_CREDENTIALS_PASSWORD:
+        case FSP_NP_CREDENTIALS_USERPASS:
+            *PCredentialsKind = Record->Credentials;
+            break;
+        }
 
-exit:
-    if (0 != RegKey)
-        RegCloseKey(RegKey);
+    if (0 != PAllowImpersonation)
+        *PAllowImpersonation = 0 != Record->RunAs &&
+            L'.' == Record->RunAs[0] && L'\0' == Record->RunAs[1];
 
-    return NpResult;
+    FspLaunchRegFreeRecord(Record);
+
+    return WN_SUCCESS;
 }
 
 static DWORD FspNpGetCredentials(
     HWND hwndOwner, PWSTR Caption, DWORD PrevNpResult,
-    DWORD CredentialsKind,
+    DWORD AuthPackage0, DWORD CredentialsKind,
     PBOOL PSave,
     PWSTR UserName, ULONG UserNameSize/* in chars */,
     PWSTR Password, ULONG PasswordSize/* in chars */)
@@ -343,7 +393,7 @@ static DWORD FspNpGetCredentials(
         (FSP_NP_CREDENTIALS_PASSWORD == CredentialsKind ? 0/*CREDUI_FLAGS_KEEP_USERNAME*/ : 0));
 #else
     WCHAR Domain[CREDUI_MAX_DOMAIN_TARGET_LENGTH + 1];
-    ULONG AuthPackage = 0;
+    ULONG AuthPackage = 0 != AuthPackage0 ? AuthPackage0 - 1 : 0;
     PVOID InAuthBuf = 0, OutAuthBuf = 0;
     ULONG InAuthSize, OutAuthSize, DomainSize;
 
@@ -372,7 +422,8 @@ static DWORD FspNpGetCredentials(
 
     NpResult = CredUIPromptForWindowsCredentialsW(&UiInfo, PrevNpResult,
         &AuthPackage, InAuthBuf, InAuthSize, &OutAuthBuf, &OutAuthSize, PSave,
-        CREDUIWIN_GENERIC | (0 != PSave ? CREDUIWIN_CHECKBOX : 0));
+        (0 != AuthPackage0 ? CREDUIWIN_AUTHPACKAGE_ONLY : CREDUIWIN_GENERIC) |
+            (0 != PSave ? CREDUIWIN_CHECKBOX : 0));
     if (ERROR_SUCCESS != NpResult)
         goto exit;
 
@@ -426,7 +477,7 @@ DWORD APIENTRY NPGetConnection(
 
     Result = FspNpGetVolumeList(&VolumeListBuf, &VolumeListSize);
     if (!NT_SUCCESS(Result))
-        return WN_OUT_OF_MEMORY;
+        return WN_NOT_CONNECTED;
 
     NpResult = WN_NOT_CONNECTED;
     for (P = VolumeListBuf, VolumeListBufEnd = (PVOID)((PUINT8)P + VolumeListSize), VolumeName = P;
@@ -490,7 +541,10 @@ DWORD APIENTRY NPAddConnection(LPNETRESOURCEW lpNetResource, LPWSTR lpPassword, 
     PWSTR ClassName, InstanceName, RemoteName, P;
     ULONG ClassNameLen, InstanceNameLen;
     DWORD CredentialsKind;
-    PWSTR PipeBuf = 0;
+    BOOLEAN AllowImpersonation;
+    ULONG Argc;
+    PWSTR Argv[6];
+    ULONG Argl[6];
 #if defined(FSP_NP_CREDENTIAL_MANAGER)
     PCREDENTIALW Credential = 0;
 #endif
@@ -517,7 +571,9 @@ DWORD APIENTRY NPAddConnection(LPNETRESOURCEW lpNetResource, LPWSTR lpPassword, 
             return WN_ALREADY_CONNECTED;
     }
 
-    FspNpGetCredentialsKind(lpRemoteName, &CredentialsKind);
+    NpResult = FspNpGetRemoteInfo(lpRemoteName, 0, &CredentialsKind, &AllowImpersonation);
+    if (WN_SUCCESS != NpResult)
+        return NpResult;
 
 #if defined(FSP_NP_CREDENTIAL_MANAGER)
     /* if we need credentials and none were passed check with the credential manager */
@@ -556,32 +612,24 @@ DWORD APIENTRY NPAddConnection(LPNETRESOURCEW lpNetResource, LPWSTR lpPassword, 
         }
     }
 
-    PipeBuf = MemAlloc(LAUNCHER_PIPE_BUFFER_SIZE);
-    if (0 == PipeBuf)
-    {
-        NpResult = WN_OUT_OF_MEMORY;
-        goto exit;
-    }
-
-    /* we do not explicitly check, but assumption is it all fits in LAUNCHER_PIPE_BUFFER_SIZE */
-    P = PipeBuf;
-    *P++ = FSP_NP_CREDENTIALS_NONE != CredentialsKind ?
-        LauncherSvcInstanceStartWithSecret : LauncherSvcInstanceStart;
-    memcpy(P, ClassName, ClassNameLen * sizeof(WCHAR)); P += ClassNameLen; *P++ = L'\0';
-    memcpy(P, InstanceName, InstanceNameLen * sizeof(WCHAR)); P += InstanceNameLen; *P++ = L'\0';
-    lstrcpyW(P, RemoteName); P += lstrlenW(RemoteName) + 1;
-    lstrcpyW(P, LocalNameBuf); P += lstrlenW(LocalNameBuf) + 1;
+    Argc = 0;
+    Argv[Argc] = ClassName; Argl[Argc] = ClassNameLen; Argc++;
+    Argv[Argc] = InstanceName; Argl[Argc] = InstanceNameLen; Argc++;
+    Argv[Argc] = RemoteName; Argl[Argc] = -1; Argc++;
+    Argv[Argc] = LocalNameBuf; Argl[Argc] = -1; Argc++;
     if (FSP_NP_CREDENTIALS_USERPASS == CredentialsKind)
     {
-        lstrcpyW(P, lpUserName); P += lstrlenW(lpUserName) + 1;
+        Argv[Argc] = lpUserName; Argl[Argc] = -1; Argc++;
     }
     if (FSP_NP_CREDENTIALS_NONE != CredentialsKind)
     {
-        lstrcpyW(P, lpPassword); P += lstrlenW(lpPassword) + 1;
+        Argv[Argc] = lpPassword; Argl[Argc] = -1; Argc++;
     }
 
     NpResult = FspNpCallLauncherPipe(
-        PipeBuf, (ULONG)(P - PipeBuf) * sizeof(WCHAR), LAUNCHER_PIPE_BUFFER_SIZE);
+        FSP_NP_CREDENTIALS_NONE != CredentialsKind ? FspLaunchCmdStartWithSecret : FspLaunchCmdStart,
+        Argc, Argv, Argl, 0, 0,
+        AllowImpersonation);
     switch (NpResult)
     {
     case WN_SUCCESS:
@@ -627,13 +675,14 @@ DWORD APIENTRY NPAddConnection(LPNETRESOURCEW lpNetResource, LPWSTR lpPassword, 
                     break;
                 }
 
-                P = PipeBuf;
-                *P++ = LauncherSvcInstanceInfo;
-                memcpy(P, ClassName, ClassNameLen * sizeof(WCHAR)); P += ClassNameLen; *P++ = L'\0';
-                memcpy(P, InstanceName, InstanceNameLen * sizeof(WCHAR)); P += InstanceNameLen; *P++ = L'\0';
+                Argc = 0;
+                Argv[Argc] = ClassName; Argl[Argc] = ClassNameLen; Argc++;
+                Argv[Argc] = InstanceName; Argl[Argc] = InstanceNameLen; Argc++;
 
                 if (WN_SUCCESS != FspNpCallLauncherPipe(
-                    PipeBuf, (ULONG)(P - PipeBuf) * sizeof(WCHAR), LAUNCHER_PIPE_BUFFER_SIZE))
+                    FspLaunchCmdGetInfo,
+                    Argc, Argv, Argl, 0, 0,
+                    FALSE))
                 {
                     /* looks like the file system is gone! */
                     NpResult = WN_NO_NETWORK;
@@ -677,8 +726,6 @@ DWORD APIENTRY NPAddConnection(LPNETRESOURCEW lpNetResource, LPWSTR lpPassword, 
     }
 
 exit:
-    MemFree(PipeBuf);
-
 #if defined(FSP_NP_CREDENTIAL_MANAGER)
     if (0 != Credential)
         CredFree(Credential);
@@ -692,7 +739,7 @@ DWORD APIENTRY NPAddConnection3(HWND hwndOwner,
 {
     DWORD NpResult;
     PWSTR RemoteName = lpNetResource->lpRemoteName;
-    DWORD CredentialsKind;
+    DWORD AuthPackage, CredentialsKind;
     WCHAR UserName[CREDUI_MAX_USERNAME_LENGTH + 1], Password[CREDUI_MAX_PASSWORD_LENGTH + 1];
 #if defined(FSP_NP_CREDENTIAL_MANAGER)
     BOOL Save = TRUE;
@@ -712,7 +759,9 @@ DWORD APIENTRY NPAddConnection3(HWND hwndOwner,
             return NpResult;
     }
 
-    FspNpGetCredentialsKind(RemoteName, &CredentialsKind);
+    NpResult = FspNpGetRemoteInfo(RemoteName, &AuthPackage, &CredentialsKind, 0);
+    if (WN_SUCCESS != NpResult)
+        return NpResult;
     if (FSP_NP_CREDENTIALS_NONE == CredentialsKind)
         return WN_CANCEL;
 
@@ -721,12 +770,12 @@ DWORD APIENTRY NPAddConnection3(HWND hwndOwner,
     lstrcpyW(UserName, L"UNSPECIFIED");
     Password[0] = L'\0';
     if (FSP_NP_CREDENTIALS_PASSWORD == CredentialsKind)
-        FspNpParseUserName(RemoteName, UserName, sizeof UserName / sizeof UserName[0]);
+        FspNpParseRemoteUserName(RemoteName, UserName, sizeof UserName / sizeof UserName[0]);
     do
     {
         NpResult = FspNpGetCredentials(
             hwndOwner, RemoteName, NpResult,
-            CredentialsKind,
+            AuthPackage, CredentialsKind,
 #if defined(FSP_NP_CREDENTIAL_MANAGER)
             &Save,
 #else
@@ -767,9 +816,11 @@ DWORD APIENTRY NPCancelConnection(LPWSTR lpName, BOOL fForce)
     DWORD NpResult;
     WCHAR RemoteNameBuf[sizeof(((FSP_FSCTL_VOLUME_PARAMS *)0)->Prefix) / sizeof(WCHAR)];
     DWORD RemoteNameSize;
-    PWSTR ClassName, InstanceName, RemoteName, P;
+    PWSTR ClassName, InstanceName, RemoteName;
     ULONG ClassNameLen, InstanceNameLen;
-    PWSTR PipeBuf = 0;
+    ULONG Argc;
+    PWSTR Argv[2];
+    ULONG Argl[2];
 
     if (FspNpCheckLocalName(lpName))
     {
@@ -789,17 +840,14 @@ DWORD APIENTRY NPCancelConnection(LPWSTR lpName, BOOL fForce)
         &ClassName, &ClassNameLen, &InstanceName, &InstanceNameLen))
         return WN_BAD_NETNAME;
 
-    PipeBuf = MemAlloc(LAUNCHER_PIPE_BUFFER_SIZE);
-    if (0 == PipeBuf)
-        return WN_OUT_OF_MEMORY;
-
-    P = PipeBuf;
-    *P++ = LauncherSvcInstanceStop;
-    memcpy(P, ClassName, ClassNameLen * sizeof(WCHAR)); P += ClassNameLen; *P++ = L'\0';
-    memcpy(P, InstanceName, InstanceNameLen * sizeof(WCHAR)); P += InstanceNameLen; *P++ = L'\0';
+    Argc = 0;
+    Argv[Argc] = ClassName; Argl[Argc] = ClassNameLen; Argc++;
+    Argv[Argc] = InstanceName; Argl[Argc] = InstanceNameLen; Argc++;
 
     NpResult = FspNpCallLauncherPipe(
-        PipeBuf, (ULONG)(P - PipeBuf) * sizeof(WCHAR), LAUNCHER_PIPE_BUFFER_SIZE);
+        FspLaunchCmdStop,
+        Argc, Argv, Argl, 0, 0,
+        FALSE);
     switch (NpResult)
     {
     case WN_SUCCESS:
@@ -811,8 +859,6 @@ DWORD APIENTRY NPCancelConnection(LPWSTR lpName, BOOL fForce)
         NpResult = WN_NO_NETWORK;
         break;
     }
-
-    MemFree(PipeBuf);
 
     return NpResult;
 }
@@ -1016,7 +1062,7 @@ NTSTATUS FspNpRegister(VOID)
     WCHAR ProviderPath[MAX_PATH];
     WCHAR RegBuffer[1024];
     PWSTR P, Part;
-    DWORD RegResult, RegType, RegBufferSize;
+    DWORD RegResult, RegType, RegBufferSize, RegBufferOffset;
     HKEY RegKey;
     BOOLEAN FoundProvider;
 
@@ -1073,6 +1119,13 @@ NTSTATUS FspNpRegister(VOID)
     if (ERROR_SUCCESS != RegResult)
         goto close_and_exit;
 
+    RegResult = RegSetValueExW(RegKey,
+        L"DeviceName", 0, REG_SZ,
+        (PVOID)L"\\Device\\" FSP_FSCTL_MUP_DEVICE_NAME,
+        sizeof L"\\Device\\" FSP_FSCTL_MUP_DEVICE_NAME);
+    if (ERROR_SUCCESS != RegResult)
+        goto close_and_exit;
+
     RegCloseKey(RegKey);
 
     RegResult = RegOpenKeyExW(
@@ -1082,15 +1135,20 @@ NTSTATUS FspNpRegister(VOID)
         return FspNtStatusFromWin32(RegResult);
 
     RegBufferSize = sizeof RegBuffer - sizeof L"," FSP_NP_NAME;
+#ifdef FSP_NP_ORDER_FIRST
+    RegBufferOffset = sizeof "" FSP_NP_NAME;
+#else
+    RegBufferOffset = 0;
+#endif
     RegResult = RegQueryValueExW(RegKey,
-        L"ProviderOrder", 0, &RegType, (PVOID)RegBuffer, &RegBufferSize);
+        L"ProviderOrder", 0, &RegType, (PVOID)&RegBuffer[RegBufferOffset], &RegBufferSize);
     if (ERROR_SUCCESS != RegResult)
         goto close_and_exit;
     RegBufferSize /= sizeof(WCHAR);
 
     FoundProvider = FALSE;
-    RegBuffer[RegBufferSize] = L'\0';
-    P = RegBuffer, Part = P;
+    RegBuffer[RegBufferSize + RegBufferOffset] = L'\0';
+    P = &RegBuffer[RegBufferOffset], Part = P;
     do
     {
         if (L',' == *P || '\0' == *P)
@@ -1107,8 +1165,11 @@ NTSTATUS FspNpRegister(VOID)
 
     if (!FoundProvider)
     {
-        P--;
-        memcpy(P, L"," FSP_NP_NAME, sizeof L"," FSP_NP_NAME);
+#ifdef FSP_NP_ORDER_FIRST
+        memcpy((PWSTR)RegBuffer, L"" FSP_NP_NAME ",", sizeof L"" FSP_NP_NAME);
+#else
+        memcpy(--P, L"," FSP_NP_NAME, sizeof L"," FSP_NP_NAME);
+#endif
 
         RegBufferSize = lstrlenW(RegBuffer);
         RegBufferSize++;

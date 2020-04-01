@@ -1,5 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="14.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\version.properties" />
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
       <Configuration>Debug</Configuration>
@@ -22,32 +23,32 @@
     <ProjectGuid>{262DF8CC-E7A8-4460-A22C-683CBA322C32}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>winfsptests</RootNamespace>
-    <WindowsTargetPlatformVersion>8.1</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -106,7 +107,6 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>ntdll.lib;netapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -123,7 +123,6 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalDependencies>ntdll.lib;netapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
@@ -142,7 +141,6 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>ntdll.lib;netapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -163,7 +161,6 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <AdditionalDependencies>ntdll.lib;netapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -182,14 +179,19 @@
     </ClCompile>
     <ClCompile Include="..\..\..\tst\memfs\memfs.cpp" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\create-test.c" />
+    <ClCompile Include="..\..\..\tst\winfsp-tests\devctl-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\dirbuf-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\dirctl-test.c" />
+    <ClCompile Include="..\..\..\tst\winfsp-tests\ea-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\eventlog-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\exec-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\flush-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\fuse-opt-test.c" />
+    <ClCompile Include="..\..\..\tst\winfsp-tests\fuse-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\hooks.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\info-test.c" />
+    <ClCompile Include="..\..\..\tst\winfsp-tests\launch-test.c" />
+    <ClCompile Include="..\..\..\tst\winfsp-tests\launcher-ptrans-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\lock-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\memfs-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\mount-test.c" />
@@ -202,8 +204,11 @@
     <ClCompile Include="..\..\..\tst\winfsp-tests\security-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\stream-tests.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\timeout-test.c" />
+    <ClCompile Include="..\..\..\tst\winfsp-tests\uuid5-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\version-test.c" />
+    <ClCompile Include="..\..\..\tst\winfsp-tests\volpath-test.c" />
     <ClCompile Include="..\..\..\tst\winfsp-tests\winfsp-tests.c" />
+    <ClCompile Include="..\..\..\tst\winfsp-tests\wsl-test.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\ext\tlib\testsuite.h" />

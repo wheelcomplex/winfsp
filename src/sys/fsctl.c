@@ -1,7 +1,7 @@
 /**
  * @file sys/fsctl.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <sys/driver.h>
@@ -73,6 +77,10 @@ static NTSTATUS FspFsctlFileSystemControl(
     case IRP_MN_USER_FS_REQUEST:
         switch (IrpSp->Parameters.FileSystemControl.FsControlCode)
         {
+        case FSP_FSCTL_MOUNTDEV:
+            if (0 != IrpSp->FileObject->FsContext2)
+                Result = FspVolumeMakeMountdev(FsctlDeviceObject, Irp, IrpSp);
+            break;
         case FSP_FSCTL_VOLUME_NAME:
             if (0 != IrpSp->FileObject->FsContext2)
                 Result = FspVolumeGetName(FsctlDeviceObject, Irp, IrpSp);
@@ -82,12 +90,21 @@ static NTSTATUS FspFsctlFileSystemControl(
             break;
         case FSP_FSCTL_TRANSACT:
         case FSP_FSCTL_TRANSACT_BATCH:
+        case FSP_FSCTL_TRANSACT_INTERNAL:
             if (0 != IrpSp->FileObject->FsContext2)
                 Result = FspVolumeTransact(FsctlDeviceObject, Irp, IrpSp);
             break;
         case FSP_FSCTL_STOP:
             if (0 != IrpSp->FileObject->FsContext2)
                 Result = FspVolumeStop(FsctlDeviceObject, Irp, IrpSp);
+            break;
+        default:
+            if (CTL_CODE(0, 0xC00, 0, 0) ==
+                (IrpSp->Parameters.FileSystemControl.FsControlCode & CTL_CODE(0, 0xC00, 0, 0)))
+            {
+                if (0 != IrpSp->FileObject->FsContext2)
+                    Result = FspVolumeTransactFsext(FsctlDeviceObject, Irp, IrpSp);
+            }
             break;
         }
         break;

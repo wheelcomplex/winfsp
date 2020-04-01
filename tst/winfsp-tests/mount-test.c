@@ -1,7 +1,7 @@
 /**
  * @file mount-test.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <winfsp/winfsp.h>
@@ -61,11 +65,40 @@ void mount_open_device_test(void)
         mount_open_device_dotest(L"WinFsp.Net");
 }
 
+void mount_create_volume_v0_dotest(PWSTR DeviceName)
+{
+    NTSTATUS Result;
+    BOOL Success;
+    FSP_FSCTL_VOLUME_PARAMS_V0 VolumeParams = { 0 };
+    WCHAR VolumeName[MAX_PATH];
+    HANDLE VolumeHandle;
+
+    VolumeParams.SectorSize = 16384;
+    VolumeParams.VolumeSerialNumber = 0x12345678;
+    wcscpy_s(VolumeParams.Prefix, sizeof VolumeParams.Prefix / sizeof(WCHAR), L"\\winfsp-tests\\share");
+    Result = FspFsctlCreateVolume(DeviceName, (FSP_FSCTL_VOLUME_PARAMS *)&VolumeParams,
+        VolumeName, sizeof VolumeName, &VolumeHandle);
+    ASSERT(STATUS_SUCCESS == Result);
+    ASSERT(0 == wcsncmp(L"\\Device\\Volume{", VolumeName, 15));
+    ASSERT(INVALID_HANDLE_VALUE != VolumeHandle);
+
+    Success = CloseHandle(VolumeHandle);
+    ASSERT(Success);
+}
+
+void mount_create_volume_v0_test(void)
+{
+    if (WinFspDiskTests)
+        mount_create_volume_v0_dotest(L"WinFsp.Disk");
+    if (WinFspNetTests)
+        mount_create_volume_v0_dotest(L"WinFsp.Net");
+}
+
 void mount_create_volume_dotest(PWSTR DeviceName)
 {
     NTSTATUS Result;
     BOOL Success;
-    FSP_FSCTL_VOLUME_PARAMS VolumeParams = { 0 };
+    FSP_FSCTL_VOLUME_PARAMS VolumeParams = { .Version = sizeof VolumeParams };
     WCHAR VolumeName[MAX_PATH];
     HANDLE VolumeHandle;
 
@@ -286,6 +319,15 @@ void mount_preflight_dotest(PWSTR DeviceName)
     MountPoint[2] = L'\0';
 
     GetTestDirectory(DirBuf);
+    /*
+     * Mount points starting with \\?\X: or \\.\X: are now considered MountManager mountpoints.
+     * So skip the \\?\ prefix to avoid this problem.
+     */
+    if (L'\\' == DirBuf[0] &&
+        L'\\' == DirBuf[1] &&
+        (L'?' == DirBuf[2] || L'.' == DirBuf[2]) &&
+        L'\\' == DirBuf[3])
+        memmove(DirBuf, DirBuf + 4, (wcslen(DirBuf + 4) + 1) * sizeof(WCHAR));
 
     Drives = GetLogicalDrives();
     ASSERT(0 != Drives);
@@ -341,6 +383,7 @@ void mount_tests(void)
 
     TEST_OPT(mount_invalid_test);
     TEST_OPT(mount_open_device_test);
+    TEST_OPT(mount_create_volume_v0_test);
     TEST_OPT(mount_create_volume_test);
     TEST_OPT(mount_volume_cancel_test);
     TEST_OPT(mount_volume_transact_test);

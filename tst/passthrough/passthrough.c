@@ -1,7 +1,7 @@
 /**
  * @file passthrough.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <winfsp/winfsp.h>
@@ -444,21 +448,6 @@ static NTSTATUS SetFileSize(FSP_FILE_SYSTEM *FileSystem,
     return GetFileInfoInternal(Handle, FileInfo);
 }
 
-static NTSTATUS CanDelete(FSP_FILE_SYSTEM *FileSystem,
-    PVOID FileContext, PWSTR FileName)
-{
-    HANDLE Handle = HandleFromContext(FileContext);
-    FILE_DISPOSITION_INFO DispositionInfo;
-
-    DispositionInfo.DeleteFile = TRUE;
-
-    if (!SetFileInformationByHandle(Handle,
-        FileDispositionInfo, &DispositionInfo, sizeof DispositionInfo))
-        return FspNtStatusFromWin32(GetLastError());
-
-    return STATUS_SUCCESS;
-}
-
 static NTSTATUS Rename(FSP_FILE_SYSTEM *FileSystem,
     PVOID FileContext,
     PWSTR FileName, PWSTR NewFileName, BOOLEAN ReplaceIfExists)
@@ -593,27 +582,42 @@ static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM *FileSystem,
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS SetDelete(FSP_FILE_SYSTEM *FileSystem,
+    PVOID FileContext, PWSTR FileName, BOOLEAN DeleteFile)
+{
+    HANDLE Handle = HandleFromContext(FileContext);
+    FILE_DISPOSITION_INFO DispositionInfo;
+
+    DispositionInfo.DeleteFile = DeleteFile;
+
+    if (!SetFileInformationByHandle(Handle,
+        FileDispositionInfo, &DispositionInfo, sizeof DispositionInfo))
+        return FspNtStatusFromWin32(GetLastError());
+
+    return STATUS_SUCCESS;
+}
+
 static FSP_FILE_SYSTEM_INTERFACE PtfsInterface =
 {
-    GetVolumeInfo,
-    SetVolumeLabel_,
-    GetSecurityByName,
-    Create,
-    Open,
-    Overwrite,
-    Cleanup,
-    Close,
-    Read,
-    Write,
-    Flush,
-    GetFileInfo,
-    SetBasicInfo,
-    SetFileSize,
-    CanDelete,
-    Rename,
-    GetSecurity,
-    SetSecurity,
-    ReadDirectory,
+    .GetVolumeInfo = GetVolumeInfo,
+    .SetVolumeLabel = SetVolumeLabel_,
+    .GetSecurityByName = GetSecurityByName,
+    .Create = Create,
+    .Open = Open,
+    .Overwrite = Overwrite,
+    .Cleanup = Cleanup,
+    .Close = Close,
+    .Read = Read,
+    .Write = Write,
+    .Flush = Flush,
+    .GetFileInfo = GetFileInfo,
+    .SetBasicInfo = SetBasicInfo,
+    .SetFileSize = SetFileSize,
+    .Rename = Rename,
+    .GetSecurity = GetSecurity,
+    .SetSecurity = SetSecurity,
+    .ReadDirectory = ReadDirectory,
+    .SetDelete = SetDelete,
 };
 
 static VOID PtfsDelete(PTFS *Ptfs);
@@ -688,6 +692,7 @@ static NTSTATUS PtfsCreate(PWSTR Path, PWSTR VolumePrefix, PWSTR MountPoint, UIN
     VolumeParams.PersistentAcls = 1;
     VolumeParams.PostCleanupWhenModifiedOnly = 1;
     VolumeParams.PassQueryDirectoryPattern = 1;
+    VolumeParams.FlushAndPurgeOnCleanup = 1;
     VolumeParams.UmFileContextIsUserContext2 = 1;
     if (0 != VolumePrefix)
         wcscpy_s(VolumeParams.Prefix, sizeof VolumeParams.Prefix / sizeof(WCHAR), VolumePrefix);

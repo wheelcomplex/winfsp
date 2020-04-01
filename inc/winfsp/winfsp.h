@@ -5,7 +5,7 @@
  * In order to use the WinFsp API the user mode file system must include &lt;winfsp/winfsp.h&gt;
  * and link with the winfsp_x64.dll (or winfsp_x86.dll) library.
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -14,9 +14,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #ifndef WINFSP_WINFSP_H_INCLUDED
@@ -80,6 +84,21 @@ typedef struct _REPARSE_DATA_BUFFER
     } DUMMYUNIONNAME;
 } REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
 #endif
+
+/*
+ * The FILE_FULL_EA_INFORMATION definitions are missing from the user mode headers.
+ */
+#if !defined(FILE_NEED_EA)
+#define FILE_NEED_EA                    0x00000080
+#endif
+typedef struct _FILE_FULL_EA_INFORMATION
+{
+    ULONG NextEntryOffset;
+    UCHAR Flags;
+    UCHAR EaNameLength;
+    USHORT EaValueLength;
+    CHAR EaName[1];
+} FILE_FULL_EA_INFORMATION, *PFILE_FULL_EA_INFORMATION;
 
 /**
  * @group File System
@@ -380,6 +399,7 @@ typedef struct _FSP_FILE_SYSTEM_INTERFACE
      * @see
      *     Close
      *     CanDelete
+     *     SetDelete
      */
     VOID (*Cleanup)(FSP_FILE_SYSTEM *FileSystem,
         PVOID FileContext, PWSTR FileName, ULONG Flags);
@@ -563,6 +583,9 @@ typedef struct _FSP_FILE_SYSTEM_INTERFACE
      * This function gets called when Win32 API's such as DeleteFile or RemoveDirectory are used.
      * It does not get called when a file or directory is opened with FILE_DELETE_ON_CLOSE.
      *
+     * NOTE: If both CanDelete and SetDelete are defined, SetDelete takes precedence. However
+     * most file systems need only implement the CanDelete operation.
+     *
      * @param FileSystem
      *     The file system on which this request is posted.
      * @param FileContext
@@ -573,6 +596,7 @@ typedef struct _FSP_FILE_SYSTEM_INTERFACE
      *     STATUS_SUCCESS or error code.
      * @see
      *     Cleanup
+     *     SetDelete
      */
     NTSTATUS (*CanDelete)(FSP_FILE_SYSTEM *FileSystem,
         PVOID FileContext, PWSTR FileName);
@@ -802,12 +826,224 @@ typedef struct _FSP_FILE_SYSTEM_INTERFACE
     NTSTATUS (*GetStreamInfo)(FSP_FILE_SYSTEM *FileSystem,
         PVOID FileContext, PVOID Buffer, ULONG Length,
         PULONG PBytesTransferred);
+    /**
+     * Get directory information for a single file or directory within a parent directory.
+     *
+     * @param FileSystem
+     *     The file system on which this request is posted.
+     * @param FileContext
+     *     The file context of the parent directory.
+     * @param FileName
+     *     The name of the file or directory to get information for. This name is relative
+     *     to the parent directory and is a single path component.
+     * @param DirInfo [out]
+     *     Pointer to a structure that will receive the directory information on successful
+     *     return from this call. This information includes the file name, but also file
+     *     attributes, file times, etc.
+     * @return
+     *     STATUS_SUCCESS or error code.
+     */
+    NTSTATUS (*GetDirInfoByName)(FSP_FILE_SYSTEM *FileSystem,
+        PVOID FileContext, PWSTR FileName,
+        FSP_FSCTL_DIR_INFO *DirInfo);
+    /**
+     * Process control code.
+     *
+     * This function is called when a program uses the DeviceIoControl API.
+     *
+     * @param FileSystem
+     *     The file system on which this request is posted.
+     * @param FileContext
+     *     The file context of the file or directory to be controled.
+     * @param ControlCode
+     *     The control code for the operation. This code must have a DeviceType with bit
+     *     0x8000 set and must have a TransferType of METHOD_BUFFERED.
+     * @param InputBuffer
+     *     Pointer to a buffer that contains the input data.
+     * @param InputBufferLength
+     *     Input data length.
+     * @param OutputBuffer
+     *     Pointer to a buffer that will receive the output data.
+     * @param OutputBufferLength
+     *     Output data length.
+     * @param PBytesTransferred [out]
+     *     Pointer to a memory location that will receive the actual number of bytes transferred.
+     * @return
+     *     STATUS_SUCCESS or error code.
+     */
+    NTSTATUS (*Control)(FSP_FILE_SYSTEM *FileSystem,
+        PVOID FileContext, UINT32 ControlCode,
+        PVOID InputBuffer, ULONG InputBufferLength,
+        PVOID OutputBuffer, ULONG OutputBufferLength, PULONG PBytesTransferred);
+    /**
+     * Set the file delete flag.
+     *
+     * This function sets a flag to indicates whether the FSD file should delete a file
+     * when it is closed. This function does not need to perform access checks, but may
+     * performs tasks such as check for empty directories, etc.
+     *
+     * This function should <b>NEVER</b> delete the file or directory in question. Deletion should
+     * happen during Cleanup with the FspCleanupDelete flag set.
+     *
+     * This function gets called when Win32 API's such as DeleteFile or RemoveDirectory are used.
+     * It does not get called when a file or directory is opened with FILE_DELETE_ON_CLOSE.
+     *
+     * NOTE: If both CanDelete and SetDelete are defined, SetDelete takes precedence. However
+     * most file systems need only implement the CanDelete operation.
+     *
+     * @param FileSystem
+     *     The file system on which this request is posted.
+     * @param FileContext
+     *     The file context of the file or directory to set the delete flag for.
+     * @param FileName
+     *     The name of the file or directory to set the delete flag for.
+     * @param DeleteFile
+     *     If set to TRUE the FSD indicates that the file will be deleted on Cleanup; otherwise
+     *     it will not be deleted. It is legal to receive multiple SetDelete calls for the same
+     *     file with different DeleteFile parameters.
+     * @return
+     *     STATUS_SUCCESS or error code.
+     * @see
+     *     Cleanup
+     *     CanDelete
+     */
+    NTSTATUS (*SetDelete)(FSP_FILE_SYSTEM *FileSystem,
+        PVOID FileContext, PWSTR FileName, BOOLEAN DeleteFile);
+    /**
+     * Create new file or directory.
+     *
+     * This function works like Create, except that it also accepts an extra buffer that
+     * may contain extended attributes or a reparse point.
+     *
+     * NOTE: If both Create and CreateEx are defined, CreateEx takes precedence.
+     *
+     * @param FileSystem
+     *     The file system on which this request is posted.
+     * @param FileName
+     *     The name of the file or directory to be created.
+     * @param CreateOptions
+     *     Create options for this request. This parameter has the same meaning as the
+     *     CreateOptions parameter of the NtCreateFile API. User mode file systems should typically
+     *     only be concerned with the flag FILE_DIRECTORY_FILE, which is an instruction to create a
+     *     directory rather than a file. Some file systems may also want to pay attention to the
+     *     FILE_NO_INTERMEDIATE_BUFFERING and FILE_WRITE_THROUGH flags, although these are
+     *     typically handled by the FSD component.
+     * @param GrantedAccess
+     *     Determines the specific access rights that have been granted for this request. Upon
+     *     receiving this call all access checks have been performed and the user mode file system
+     *     need not perform any additional checks. However this parameter may be useful to a user
+     *     mode file system; for example the WinFsp-FUSE layer uses this parameter to determine
+     *     which flags to use in its POSIX open() call.
+     * @param FileAttributes
+     *     File attributes to apply to the newly created file or directory.
+     * @param SecurityDescriptor
+     *     Security descriptor to apply to the newly created file or directory. This security
+     *     descriptor will always be in self-relative format. Its length can be retrieved using the
+     *     Windows GetSecurityDescriptorLength API. Will be NULL for named streams.
+     * @param AllocationSize
+     *     Allocation size for the newly created file.
+     * @param ExtraBuffer
+     *     Extended attributes or reparse point buffer.
+     * @param ExtraLength
+     *     Extended attributes or reparse point buffer length.
+     * @param ExtraBufferIsReparsePoint
+     *     FALSE: extra buffer is extended attributes; TRUE: extra buffer is reparse point.
+     * @param PFileContext [out]
+     *     Pointer that will receive the file context on successful return from this call.
+     * @param FileInfo [out]
+     *     Pointer to a structure that will receive the file information on successful return
+     *     from this call. This information includes file attributes, file times, etc.
+     * @return
+     *     STATUS_SUCCESS or error code.
+     */
+    NTSTATUS (*CreateEx)(FSP_FILE_SYSTEM *FileSystem,
+        PWSTR FileName, UINT32 CreateOptions, UINT32 GrantedAccess,
+        UINT32 FileAttributes, PSECURITY_DESCRIPTOR SecurityDescriptor, UINT64 AllocationSize,
+        PVOID ExtraBuffer, ULONG ExtraLength, BOOLEAN ExtraBufferIsReparsePoint,
+        PVOID *PFileContext, FSP_FSCTL_FILE_INFO *FileInfo);
+    /**
+     * Overwrite a file.
+     *
+     * This function works like Overwrite, except that it also accepts EA (extended attributes).
+     *
+     * NOTE: If both Overwrite and OverwriteEx are defined, OverwriteEx takes precedence.
+     *
+     * @param FileSystem
+     *     The file system on which this request is posted.
+     * @param FileContext
+     *     The file context of the file to overwrite.
+     * @param FileAttributes
+     *     File attributes to apply to the overwritten file.
+     * @param ReplaceFileAttributes
+     *     When TRUE the existing file attributes should be replaced with the new ones.
+     *     When FALSE the existing file attributes should be merged (or'ed) with the new ones.
+     * @param AllocationSize
+     *     Allocation size for the overwritten file.
+     * @param Ea
+     *     Extended attributes buffer.
+     * @param EaLength
+     *     Extended attributes buffer length.
+     * @param FileInfo [out]
+     *     Pointer to a structure that will receive the file information on successful return
+     *     from this call. This information includes file attributes, file times, etc.
+     * @return
+     *     STATUS_SUCCESS or error code.
+     */
+    NTSTATUS (*OverwriteEx)(FSP_FILE_SYSTEM *FileSystem,
+        PVOID FileContext, UINT32 FileAttributes, BOOLEAN ReplaceFileAttributes, UINT64 AllocationSize,
+        PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength,
+        FSP_FSCTL_FILE_INFO *FileInfo);
+    /**
+     * Get extended attributes.
+     *
+     * @param FileSystem
+     *     The file system on which this request is posted.
+     * @param FileContext
+     *     The file context of the file to get extended attributes for.
+     * @param Ea
+     *     Extended attributes buffer.
+     * @param EaLength
+     *     Extended attributes buffer length.
+     * @param PBytesTransferred [out]
+     *     Pointer to a memory location that will receive the actual number of bytes transferred.
+     * @return
+     *     STATUS_SUCCESS or error code.
+     * @see
+     *     SetEa
+     *     FspFileSystemAddEa
+     */
+    NTSTATUS (*GetEa)(FSP_FILE_SYSTEM *FileSystem,
+        PVOID FileContext,
+        PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength, PULONG PBytesTransferred);
+    /**
+     * Set extended attributes.
+     *
+     * @param FileSystem
+     *     The file system on which this request is posted.
+     * @param FileContext
+     *     The file context of the file to set extended attributes for.
+     * @param Ea
+     *     Extended attributes buffer.
+     * @param EaLength
+     *     Extended attributes buffer length.
+     * @param FileInfo [out]
+     *     Pointer to a structure that will receive the file information on successful return
+     *     from this call. This information includes file attributes, file times, etc.
+     * @return
+     *     STATUS_SUCCESS or error code.
+     * @see
+     *     GetEa
+     */
+    NTSTATUS (*SetEa)(FSP_FILE_SYSTEM *FileSystem,
+        PVOID FileContext,
+        PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength,
+        FSP_FSCTL_FILE_INFO *FileInfo);
 
     /*
      * This ensures that this interface will always contain 64 function pointers.
      * Please update when changing the interface as it is important for future compatibility.
      */
-    NTSTATUS (*Reserved[40])();
+    NTSTATUS (*Reserved[33])();
 } FSP_FILE_SYSTEM_INTERFACE;
 FSP_FSCTL_STATIC_ASSERT(sizeof(FSP_FILE_SYSTEM_INTERFACE) == 64 * sizeof(NTSTATUS (*)()),
     "FSP_FILE_SYSTEM_INTERFACE must have 64 entries.");
@@ -961,14 +1197,12 @@ FSP_API VOID FspFileSystemSendResponse(FSP_FILE_SYSTEM *FileSystem,
  *     The current operation context.
  */
 FSP_API FSP_FILE_SYSTEM_OPERATION_CONTEXT *FspFileSystemGetOperationContext(VOID);
-FSP_API PWSTR FspFileSystemMountPointF(FSP_FILE_SYSTEM *FileSystem);
 static inline
 PWSTR FspFileSystemMountPoint(FSP_FILE_SYSTEM *FileSystem)
 {
     return FileSystem->MountPoint;
 }
-FSP_API NTSTATUS FspFileSystemEnterOperationF(FSP_FILE_SYSTEM *FileSystem,
-    FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
+FSP_API PWSTR FspFileSystemMountPointF(FSP_FILE_SYSTEM *FileSystem);
 static inline
 NTSTATUS FspFileSystemEnterOperation(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response)
@@ -978,7 +1212,7 @@ NTSTATUS FspFileSystemEnterOperation(FSP_FILE_SYSTEM *FileSystem,
 
     return FileSystem->EnterOperation(FileSystem, Request, Response);
 }
-FSP_API NTSTATUS FspFileSystemLeaveOperationF(FSP_FILE_SYSTEM *FileSystem,
+FSP_API NTSTATUS FspFileSystemEnterOperationF(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
 static inline
 NTSTATUS FspFileSystemLeaveOperation(FSP_FILE_SYSTEM *FileSystem,
@@ -989,9 +1223,8 @@ NTSTATUS FspFileSystemLeaveOperation(FSP_FILE_SYSTEM *FileSystem,
 
     return FileSystem->LeaveOperation(FileSystem, Request, Response);
 }
-FSP_API VOID FspFileSystemSetOperationGuardF(FSP_FILE_SYSTEM *FileSystem,
-    FSP_FILE_SYSTEM_OPERATION_GUARD *EnterOperation,
-    FSP_FILE_SYSTEM_OPERATION_GUARD *LeaveOperation);
+FSP_API NTSTATUS FspFileSystemLeaveOperationF(FSP_FILE_SYSTEM *FileSystem,
+    FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
 static inline
 VOID FspFileSystemSetOperationGuard(FSP_FILE_SYSTEM *FileSystem,
     FSP_FILE_SYSTEM_OPERATION_GUARD *EnterOperation,
@@ -1000,6 +1233,9 @@ VOID FspFileSystemSetOperationGuard(FSP_FILE_SYSTEM *FileSystem,
     FileSystem->EnterOperation = EnterOperation;
     FileSystem->LeaveOperation = LeaveOperation;
 }
+FSP_API VOID FspFileSystemSetOperationGuardF(FSP_FILE_SYSTEM *FileSystem,
+    FSP_FILE_SYSTEM_OPERATION_GUARD *EnterOperation,
+    FSP_FILE_SYSTEM_OPERATION_GUARD *LeaveOperation);
 /**
  * Set file system locking strategy.
  *
@@ -1010,17 +1246,14 @@ VOID FspFileSystemSetOperationGuard(FSP_FILE_SYSTEM *FileSystem,
  * @see
  *     FSP_FILE_SYSTEM_OPERATION_GUARD_STRATEGY
  */
-FSP_API VOID FspFileSystemSetOperationGuardStrategyF(FSP_FILE_SYSTEM *FileSystem,
-    FSP_FILE_SYSTEM_OPERATION_GUARD_STRATEGY GuardStrategy);
 static inline
 VOID FspFileSystemSetOperationGuardStrategy(FSP_FILE_SYSTEM *FileSystem,
     FSP_FILE_SYSTEM_OPERATION_GUARD_STRATEGY GuardStrategy)
 {
     FileSystem->OpGuardStrategy = GuardStrategy;
 }
-FSP_API VOID FspFileSystemSetOperationF(FSP_FILE_SYSTEM *FileSystem,
-    ULONG Index,
-    FSP_FILE_SYSTEM_OPERATION *Operation);
+FSP_API VOID FspFileSystemSetOperationGuardStrategyF(FSP_FILE_SYSTEM *FileSystem,
+    FSP_FILE_SYSTEM_OPERATION_GUARD_STRATEGY GuardStrategy);
 static inline
 VOID FspFileSystemSetOperation(FSP_FILE_SYSTEM *FileSystem,
     ULONG Index,
@@ -1028,8 +1261,9 @@ VOID FspFileSystemSetOperation(FSP_FILE_SYSTEM *FileSystem,
 {
     FileSystem->Operations[Index] = Operation;
 }
-FSP_API VOID FspFileSystemGetDispatcherResultF(FSP_FILE_SYSTEM *FileSystem,
-    NTSTATUS *PDispatcherResult);
+FSP_API VOID FspFileSystemSetOperationF(FSP_FILE_SYSTEM *FileSystem,
+    ULONG Index,
+    FSP_FILE_SYSTEM_OPERATION *Operation);
 static inline
 VOID FspFileSystemGetDispatcherResult(FSP_FILE_SYSTEM *FileSystem,
     NTSTATUS *PDispatcherResult)
@@ -1038,8 +1272,8 @@ VOID FspFileSystemGetDispatcherResult(FSP_FILE_SYSTEM *FileSystem,
     *PDispatcherResult = FileSystem->DispatcherResult;
     MemoryBarrier();
 }
-FSP_API VOID FspFileSystemSetDispatcherResultF(FSP_FILE_SYSTEM *FileSystem,
-    NTSTATUS DispatcherResult);
+FSP_API VOID FspFileSystemGetDispatcherResultF(FSP_FILE_SYSTEM *FileSystem,
+    NTSTATUS *PDispatcherResult);
 static inline
 VOID FspFileSystemSetDispatcherResult(FSP_FILE_SYSTEM *FileSystem,
     NTSTATUS DispatcherResult)
@@ -1048,15 +1282,16 @@ VOID FspFileSystemSetDispatcherResult(FSP_FILE_SYSTEM *FileSystem,
         return;
     InterlockedCompareExchange(&FileSystem->DispatcherResult, DispatcherResult, 0);
 }
-FSP_API VOID FspFileSystemSetDebugLogF(FSP_FILE_SYSTEM *FileSystem,
-    UINT32 DebugLog);
+FSP_API VOID FspFileSystemSetDispatcherResultF(FSP_FILE_SYSTEM *FileSystem,
+    NTSTATUS DispatcherResult);
 static inline
 VOID FspFileSystemSetDebugLog(FSP_FILE_SYSTEM *FileSystem,
     UINT32 DebugLog)
 {
     FileSystem->DebugLog = DebugLog;
 }
-FSP_API BOOLEAN FspFileSystemIsOperationCaseSensitiveF(VOID);
+FSP_API VOID FspFileSystemSetDebugLogF(FSP_FILE_SYSTEM *FileSystem,
+    UINT32 DebugLog);
 static inline
 BOOLEAN FspFileSystemIsOperationCaseSensitive(VOID)
 {
@@ -1065,7 +1300,12 @@ BOOLEAN FspFileSystemIsOperationCaseSensitive(VOID)
         FspFsctlTransactCreateKind == Request->Kind && Request->Req.Create.CaseSensitive ||
         FspFsctlTransactQueryDirectoryKind == Request->Kind && Request->Req.QueryDirectory.CaseSensitive;
 }
-FSP_API UINT32 FspFileSystemOperationProcessIdF(VOID);
+FSP_API BOOLEAN FspFileSystemIsOperationCaseSensitiveF(VOID);
+/**
+ * Gets the originating process ID.
+ *
+ * Valid only during Create, Open and Rename requests when the target exists.
+ */
 static inline
 UINT32 FspFileSystemOperationProcessId(VOID)
 {
@@ -1082,6 +1322,7 @@ UINT32 FspFileSystemOperationProcessId(VOID)
         return 0;
     }
 }
+FSP_API UINT32 FspFileSystemOperationProcessIdF(VOID);
 
 /*
  * Operations
@@ -1106,6 +1347,10 @@ FSP_API NTSTATUS FspFileSystemOpQueryInformation(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
 FSP_API NTSTATUS FspFileSystemOpSetInformation(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
+FSP_API NTSTATUS FspFileSystemOpQueryEa(FSP_FILE_SYSTEM *FileSystem,
+    FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
+FSP_API NTSTATUS FspFileSystemOpSetEa(FSP_FILE_SYSTEM *FileSystem,
+    FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
 FSP_API NTSTATUS FspFileSystemOpFlushBuffers(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
 FSP_API NTSTATUS FspFileSystemOpQueryVolumeInformation(FSP_FILE_SYSTEM *FileSystem,
@@ -1115,6 +1360,8 @@ FSP_API NTSTATUS FspFileSystemOpSetVolumeInformation(FSP_FILE_SYSTEM *FileSystem
 FSP_API NTSTATUS FspFileSystemOpQueryDirectory(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
 FSP_API NTSTATUS FspFileSystemOpFileSystemControl(FSP_FILE_SYSTEM *FileSystem,
+    FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
+FSP_API NTSTATUS FspFileSystemOpDeviceControl(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
 FSP_API NTSTATUS FspFileSystemOpQuerySecurity(FSP_FILE_SYSTEM *FileSystem,
     FSP_FSCTL_TRANSACT_REQ *Request, FSP_FSCTL_TRANSACT_RSP *Response);
@@ -1334,6 +1581,70 @@ FSP_API NTSTATUS FspFileSystemCanReplaceReparsePoint(
  */
 FSP_API BOOLEAN FspFileSystemAddStreamInfo(FSP_FSCTL_STREAM_INFO *StreamInfo,
     PVOID Buffer, ULONG Length, PULONG PBytesTransferred);
+/**
+ * Enumerate extended attributes in a buffer.
+ *
+ * This is a helper for implementing the CreateEx and SetEa operations in file systems
+ * that support extended attributes.
+ *
+ * @param FileSystem
+ *     The file system object.
+ * @param EnumerateEa
+ *     Pointer to function that receives a single extended attribute. The function
+ *     should return STATUS_SUCCESS or an error code if unsuccessful.
+ * @param Context
+ *     User context to supply to EnumEa.
+ * @param Ea
+ *     Extended attributes buffer.
+ * @param EaLength
+ *     Extended attributes buffer length.
+ * @return
+ *     STATUS_SUCCESS or error code from EnumerateEa.
+ */
+FSP_API NTSTATUS FspFileSystemEnumerateEa(FSP_FILE_SYSTEM *FileSystem,
+    NTSTATUS (*EnumerateEa)(
+        FSP_FILE_SYSTEM *FileSystem, PVOID Context,
+        PFILE_FULL_EA_INFORMATION SingleEa),
+    PVOID Context,
+    PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength);
+/**
+ * Add extended attribute to a buffer.
+ *
+ * This is a helper for implementing the GetEa operation.
+ *
+ * @param SingleEa
+ *     The extended attribute to add. A value of NULL acts as an EOF marker for a GetEa
+ *     operation.
+ * @param Ea
+ *     Pointer to a buffer that will receive the extended attribute. This should contain
+ *     the same value passed to the GetEa Ea parameter.
+ * @param EaLength
+ *     Length of buffer. This should contain the same value passed to the GetEa
+ *     EaLength parameter.
+ * @param PBytesTransferred [out]
+ *     Pointer to a memory location that will receive the actual number of bytes stored. This should
+ *     contain the same value passed to the GetEa PBytesTransferred parameter.
+ * @return
+ *     TRUE if the extended attribute was added, FALSE if there was not enough space to add it.
+ * @see
+ *     GetEa
+ */
+FSP_API BOOLEAN FspFileSystemAddEa(PFILE_FULL_EA_INFORMATION SingleEa,
+    PFILE_FULL_EA_INFORMATION Ea, ULONG EaLength, PULONG PBytesTransferred);
+/**
+ * Get extended attribute "packed" size. This computation matches what NTFS reports.
+ *
+ * @param SingleEa
+ *     The extended attribute to get the size for.
+ * @return
+ *     The packed size of the extended attribute.
+ */
+static inline
+UINT32 FspFileSystemGetEaPackedSize(PFILE_FULL_EA_INFORMATION SingleEa)
+{
+    /* magic computations are courtesy of NTFS */
+    return 5 + SingleEa->EaNameLength + SingleEa->EaValueLength;
+}
 
 /*
  * Directory buffering
@@ -1447,6 +1758,21 @@ NTSTATUS FspPosixMapPosixToWindowsPath(const char *PosixPath, PWSTR *PWindowsPat
 FSP_API VOID FspPosixDeletePath(void *Path);
 FSP_API VOID FspPosixEncodeWindowsPath(PWSTR WindowsPath, ULONG Size);
 FSP_API VOID FspPosixDecodeWindowsPath(PWSTR WindowsPath, ULONG Size);
+static inline
+VOID FspPosixFileTimeToUnixTime(UINT64 FileTime0, __int3264 UnixTime[2])
+{
+    INT64 FileTime = (INT64)FileTime0 - 116444736000000000LL;
+    UnixTime[0] = (__int3264)(FileTime / 10000000);
+    UnixTime[1] = (__int3264)(FileTime % 10000000 * 100);
+        /* may produce negative nsec for times before UNIX epoch; strictly speaking this is incorrect */
+}
+static inline
+VOID FspPosixUnixTimeToFileTime(const __int3264 UnixTime[2], PUINT64 PFileTime)
+{
+    INT64 FileTime = (INT64)UnixTime[0] * 10000000 + (INT64)UnixTime[1] / 100 +
+        116444736000000000LL;
+    *PFileTime = FileTime;
+}
 
 /*
  * Path Handling
@@ -1636,6 +1962,19 @@ FSP_API VOID FspServiceStop(FSP_SERVICE *Service);
  */
 FSP_API BOOLEAN FspServiceIsInteractive(VOID);
 /**
+ * Check if the supplied token is from the service context.
+ *
+ * @param Token
+ *     Token to check. Pass NULL to check the current process token.
+ * @param PIsLocalSystem
+ *     Pointer to a boolean that will receive a TRUE value if the token belongs to LocalSystem
+ *     and FALSE otherwise. May be NULL.
+ * @return
+ *     STATUS_SUCCESS if the token is from the service context. STATUS_ACCESS_DENIED if it is not.
+ *     Other error codes are possible.
+ */
+FSP_API NTSTATUS FspServiceContextCheck(HANDLE Token, PBOOLEAN PIsLocalSystem);
+/**
  * Log a service message.
  *
  * This function can be used to log an arbitrary message to the Windows Event Log or to the current
@@ -1660,12 +1999,17 @@ FSP_API VOID FspEventLogV(ULONG Type, PWSTR Format, va_list ap);
 FSP_API VOID FspDebugLogSetHandle(HANDLE Handle);
 FSP_API VOID FspDebugLog(const char *Format, ...);
 FSP_API VOID FspDebugLogSD(const char *Format, PSECURITY_DESCRIPTOR SecurityDescriptor);
+FSP_API VOID FspDebugLogSid(const char *format, PSID Sid);
 FSP_API VOID FspDebugLogFT(const char *Format, PFILETIME FileTime);
 FSP_API VOID FspDebugLogRequest(FSP_FSCTL_TRANSACT_REQ *Request);
 FSP_API VOID FspDebugLogResponse(FSP_FSCTL_TRANSACT_RSP *Response);
 FSP_API NTSTATUS FspCallNamedPipeSecurely(PWSTR PipeName,
     PVOID InBuffer, ULONG InBufferSize, PVOID OutBuffer, ULONG OutBufferSize,
     PULONG PBytesTransferred, ULONG Timeout,
+    PSID Sid);
+FSP_API NTSTATUS FspCallNamedPipeSecurelyEx(PWSTR PipeName,
+    PVOID InBuffer, ULONG InBufferSize, PVOID OutBuffer, ULONG OutBufferSize,
+    PULONG PBytesTransferred, ULONG Timeout, BOOLEAN AllowImpersonation,
     PSID Sid);
 FSP_API NTSTATUS FspVersion(PUINT32 PVersion);
 

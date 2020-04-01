@@ -1,7 +1,7 @@
 /**
  * @file dll/fsctl.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <dll/library.h>
@@ -31,7 +35,7 @@ FSP_API NTSTATUS FspFsctlCreateVolume(PWSTR DevicePath,
 {
     NTSTATUS Result;
     PWSTR DeviceRoot;
-    SIZE_T DeviceRootSize, DevicePathSize;
+    SIZE_T DeviceRootSize, DevicePathSize, VolumeParamsSize;
     WCHAR DevicePathBuf[MAX_PATH + sizeof *VolumeParams], *DevicePathPtr, *DevicePathEnd;
     HANDLE VolumeHandle = INVALID_HANDLE_VALUE;
     DWORD Bytes;
@@ -55,8 +59,11 @@ FSP_API NTSTATUS FspFsctlCreateVolume(PWSTR DevicePath,
     memcpy(DevicePathPtr, DevicePath, DevicePathSize);
     DevicePathPtr = (PVOID)((PUINT8)DevicePathPtr + DevicePathSize);
     memcpy(DevicePathPtr, PREFIXW, PREFIXW_SIZE);
+    VolumeParamsSize = 0 == VolumeParams->Version ?
+        sizeof(FSP_FSCTL_VOLUME_PARAMS_V0) :
+        VolumeParams->Version;
     DevicePathPtr = (PVOID)((PUINT8)DevicePathPtr + PREFIXW_SIZE);
-    DevicePathEnd = (PVOID)((PUINT8)DevicePathPtr + sizeof *VolumeParams * sizeof(WCHAR));
+    DevicePathEnd = (PVOID)((PUINT8)DevicePathPtr + VolumeParamsSize * sizeof(WCHAR));
     for (PUINT8 VolumeParamsPtr = (PVOID)VolumeParams;
         DevicePathEnd > DevicePathPtr; DevicePathPtr++, VolumeParamsPtr++)
     {
@@ -98,6 +105,20 @@ exit:
         CloseHandle(VolumeHandle);
 
     return Result;
+}
+
+FSP_API NTSTATUS FspFsctlMakeMountdev(HANDLE VolumeHandle,
+    BOOLEAN Persistent, GUID *UniqueId)
+{
+    DWORD Bytes;
+
+    if (!DeviceIoControl(VolumeHandle,
+        FSP_FSCTL_MOUNTDEV,
+        &Persistent, sizeof Persistent, UniqueId, sizeof *UniqueId,
+        &Bytes, 0))
+        return FspNtStatusFromWin32(GetLastError());
+
+    return STATUS_SUCCESS;
 }
 
 FSP_API NTSTATUS FspFsctlTransact(HANDLE VolumeHandle,
@@ -284,7 +305,7 @@ static NTSTATUS FspFsctlFixServiceSecurity(HANDLE SvcHandle)
      * This function adds an ACE that allows Everyone to start a service.
      */
 
-    PSID WorldSid = 0;
+    PSID WorldSid;
     PSECURITY_DESCRIPTOR SecurityDescriptor = 0;
     PSECURITY_DESCRIPTOR NewSecurityDescriptor = 0;
     EXPLICIT_ACCESSW AccessEntry;
@@ -296,16 +317,10 @@ static NTSTATUS FspFsctlFixServiceSecurity(HANDLE SvcHandle)
     NTSTATUS Result;
 
     /* get the Everyone (World) SID */
-    Size = SECURITY_MAX_SID_SIZE;
-    WorldSid = MemAlloc(Size);
+    WorldSid = FspWksidGet(WinWorldSid);
     if (0 == WorldSid)
     {
         Result = STATUS_INSUFFICIENT_RESOURCES;
-        goto exit;
-    }
-    if (!CreateWellKnownSid(WinWorldSid, 0, WorldSid, &Size))
-    {
-        Result = FspNtStatusFromWin32(GetLastError());
         goto exit;
     }
 
@@ -394,7 +409,6 @@ static NTSTATUS FspFsctlFixServiceSecurity(HANDLE SvcHandle)
 exit:
     LocalFree(NewSecurityDescriptor);
     MemFree(SecurityDescriptor);
-    MemFree(WorldSid);
 
     return Result;
 }

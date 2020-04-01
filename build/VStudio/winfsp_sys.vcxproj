@@ -101,11 +101,11 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\src;..\..\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\src;..\..\opt\fsext\inc;..\..\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions> _X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cng.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateMapFile>true</GenerateMapFile>
       <ProgramDatabaseFile>$(OutDir)$(TargetFileName).pdb</ProgramDatabaseFile>
       <MapFileName>$(OutDir)$(TargetFileName).map</MapFileName>
@@ -114,11 +114,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\src;..\..\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\src;..\..\opt\fsext\inc;..\..\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions> _X86_=1;i386=1;STD_CALL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cng.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateMapFile>true</GenerateMapFile>
       <ProgramDatabaseFile>$(OutDir)$(TargetFileName).pdb</ProgramDatabaseFile>
       <MapFileName>$(OutDir)$(TargetFileName).map</MapFileName>
@@ -127,11 +127,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\src;..\..\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\src;..\..\opt\fsext\inc;..\..\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions> _WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cng.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateMapFile>true</GenerateMapFile>
       <ProgramDatabaseFile>$(OutDir)$(TargetFileName).pdb</ProgramDatabaseFile>
       <MapFileName>$(OutDir)$(TargetFileName).map</MapFileName>
@@ -140,11 +140,11 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>..\..\src;..\..\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\..\src;..\..\opt\fsext\inc;..\..\inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions> _WIN64;_AMD64_;AMD64;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>cng.lib;wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateMapFile>true</GenerateMapFile>
       <ProgramDatabaseFile>$(OutDir)$(TargetFileName).pdb</ProgramDatabaseFile>
       <MapFileName>$(OutDir)$(TargetFileName).map</MapFileName>
@@ -155,6 +155,8 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="..\..\src\shared\ku\posix.c" />
+    <ClCompile Include="..\..\src\shared\ku\uuid5.c" />
     <ClCompile Include="..\..\src\sys\cleanup.c" />
     <ClCompile Include="..\..\src\sys\close.c" />
     <ClCompile Include="..\..\src\sys\create.c" />
@@ -169,10 +171,13 @@
     <ClCompile Include="..\..\src\sys\fileinfo.c" />
     <ClCompile Include="..\..\src\sys\flush.c" />
     <ClCompile Include="..\..\src\sys\fsctl.c" />
+    <ClCompile Include="..\..\src\sys\fsext.c" />
     <ClCompile Include="..\..\src\sys\iop.c" />
     <ClCompile Include="..\..\src\sys\ioq.c" />
     <ClCompile Include="..\..\src\sys\lockctl.c" />
     <ClCompile Include="..\..\src\sys\meta.c" />
+    <ClCompile Include="..\..\src\sys\mountdev.c" />
+    <ClCompile Include="..\..\src\sys\mup.c" />
     <ClCompile Include="..\..\src\sys\name.c" />
     <ClCompile Include="..\..\src\sys\psbuffer.c" />
     <ClCompile Include="..\..\src\sys\read.c" />
@@ -187,6 +192,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\inc\winfsp\fsctl.h" />
+    <ClInclude Include="..\..\opt\fsext\inc\winfsp\fsext.h" />
+    <ClInclude Include="..\..\src\shared\ku\config.h" />
+    <ClInclude Include="..\..\src\shared\ku\library.h" />
     <ClInclude Include="..\..\src\sys\driver.h" />
   </ItemGroup>
   <ItemGroup>
@@ -211,7 +219,7 @@ for /f "delims=" %%l in (%(FullPath)) do (
     echo !line! &gt;&gt;$(OutDir)driver-$(PlatformTarget).inf
 )
 
-stampinf -v $(MyVersion) -f $(OutDir)driver-$(PlatformTarget).inf</Command>
+stampinf -d * -v $(MyVersion) -f $(OutDir)driver-$(PlatformTarget).inf</Command>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</LinkObjects>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">set DriverFile=$(TargetFileName)
 set Provider="$(MyCompanyName)"
@@ -224,7 +232,7 @@ for /f "delims=" %%l in (%(FullPath)) do (
     echo !line! &gt;&gt;$(OutDir)driver-$(PlatformTarget).inf
 )
 
-stampinf -v $(MyVersion) -f $(OutDir)driver-$(PlatformTarget).inf</Command>
+stampinf -d * -v $(MyVersion) -f $(OutDir)driver-$(PlatformTarget).inf</Command>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</LinkObjects>
       <Command Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">set DriverFile=$(TargetFileName)
 set Provider="$(MyCompanyName)"
@@ -237,7 +245,7 @@ for /f "delims=" %%l in (%(FullPath)) do (
     echo !line! &gt;&gt;$(OutDir)driver-$(PlatformTarget).inf
 )
 
-stampinf -v $(MyVersion) -f $(OutDir)driver-$(PlatformTarget).inf</Command>
+stampinf -d * -v $(MyVersion) -f $(OutDir)driver-$(PlatformTarget).inf</Command>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">false</LinkObjects>
       <Command Condition="'$(Configuration)|$(Platform)'=='Release|x64'">set DriverFile=$(TargetFileName)
 set Provider="$(MyCompanyName)"
@@ -250,7 +258,7 @@ for /f "delims=" %%l in (%(FullPath)) do (
     echo !line! &gt;&gt;$(OutDir)driver-$(PlatformTarget).inf
 )
 
-stampinf -v $(MyVersion) -f $(OutDir)driver-$(PlatformTarget).inf</Command>
+stampinf -d * -v $(MyVersion) -f $(OutDir)driver-$(PlatformTarget).inf</Command>
       <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</LinkObjects>
       <Message Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Writing driver-$(PlatformTarget).inf</Message>
       <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">$(OutDir)driver-$(PlatformTarget).inf</Outputs>

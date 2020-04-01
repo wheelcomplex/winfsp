@@ -1,7 +1,7 @@
 /**
  * @file fsbench.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,9 +10,13 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
 #include <windows.h>
@@ -58,6 +62,19 @@ static void file_overwrite_test(void)
 {
     file_create_dotest(CREATE_ALWAYS);
 }
+static void file_attr_test(void)
+{
+    WCHAR FileName[MAX_PATH];
+    DWORD FileAttributes;
+
+    for (ULONG ListIndex = 0; OptListCount > ListIndex; ListIndex++)
+        for (ULONG Index = 0; OptFileCount > Index; Index++)
+        {
+            StringCbPrintfW(FileName, sizeof FileName, L"fsbench-file%lu", Index);
+            FileAttributes = GetFileAttributesW(FileName);
+            ASSERT(INVALID_FILE_ATTRIBUTES != FileAttributes);
+        }
+}
 static void file_list_test(void)
 {
     HANDLE Handle;
@@ -74,6 +91,41 @@ static void file_list_test(void)
         Success = FindClose(Handle);
         ASSERT(Success);
     }
+}
+static void file_list_single_test(void)
+{
+    HANDLE Handle;
+    BOOL Success;
+    WCHAR FileName[MAX_PATH];
+    WIN32_FIND_DATAW FindData;
+
+    for (ULONG ListIndex = 0; OptListCount > ListIndex; ListIndex++)
+        for (ULONG Index = 0; OptFileCount > Index; Index++)
+        {
+            StringCbPrintfW(FileName, sizeof FileName, L"fsbench-file%lu", Index);
+            Handle = FindFirstFileW(FileName, &FindData);
+            ASSERT(INVALID_HANDLE_VALUE != Handle);
+            do
+            {
+            } while (FindNextFileW(Handle, &FindData));
+            Success = FindClose(Handle);
+            ASSERT(Success);
+        }
+}
+static void file_list_none_test(void)
+{
+    HANDLE Handle;
+    WCHAR FileName[MAX_PATH];
+    WIN32_FIND_DATAW FindData;
+
+    for (ULONG ListIndex = 0; OptListCount > ListIndex; ListIndex++)
+        for (ULONG Index = 0; OptFileCount > Index; Index++)
+        {
+            StringCbPrintfW(FileName, sizeof FileName, L"{5F849D7F-73AF-49AC-B7C3-657B36EAD5C4}");
+            Handle = FindFirstFileW(FileName, &FindData);
+            ASSERT(INVALID_HANDLE_VALUE == Handle);
+            ASSERT(ERROR_FILE_NOT_FOUND == GetLastError());
+        }
 }
 static void file_delete_test(void)
 {
@@ -116,7 +168,10 @@ static void file_tests(void)
     TEST(file_create_test);
     TEST(file_open_test);
     TEST(file_overwrite_test);
+    TEST(file_attr_test);
     TEST(file_list_test);
+    TEST(file_list_single_test);
+    TEST(file_list_none_test);
     TEST(file_delete_test);
     TEST(file_mkdir_test);
     TEST(file_rmdir_test);

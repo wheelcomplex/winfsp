@@ -1,7 +1,7 @@
 /**
  * @file launcher/launcher.c
  *
- * @copyright 2015-2017 Bill Zissimopoulos
+ * @copyright 2015-2020 Bill Zissimopoulos
  */
 /*
  * This file is part of WinFsp.
@@ -10,23 +10,41 @@
  * General Public License version 3 as published by the Free Software
  * Foundation.
  *
- * Licensees holding a valid commercial license may use this file in
- * accordance with the commercial license agreement provided with the
- * software.
+ * Licensees holding a valid commercial license may use this software
+ * in accordance with the commercial license agreement provided in
+ * conjunction with the software.  The terms and conditions of any such
+ * commercial license agreement shall govern, supersede, and render
+ * ineffective any application of the GPLv3 license to this software,
+ * notwithstanding of any reference thereto in the software or
+ * associated repository.
  */
 
-#include <launcher/launcher.h>
+#include <winfsp/launch.h>
+#include <shared/um/minimal.h>
+#include <aclapi.h>
 #include <sddl.h>
+#include <userenv.h>
 
 #define PROGNAME                        "WinFsp.Launcher"
 
-BOOL CreateOverlappedPipe(
-    PHANDLE PReadPipe, PHANDLE PWritePipe, PSECURITY_ATTRIBUTES SecurityAttributes, DWORD Size,
+static NTSTATUS (NTAPI *SvcNtOpenSymbolicLinkObject)(
+    PHANDLE LinkHandle,
+    ACCESS_MASK DesiredAccess,
+    POBJECT_ATTRIBUTES ObjectAttributes);
+static NTSTATUS (NTAPI *SvcNtClose)(
+    HANDLE Handle);
+
+static BOOL CreateOverlappedPipe(
+    PHANDLE PReadPipe, PHANDLE PWritePipe,
+    DWORD Size,
+    BOOL ReadInherit, BOOL WriteInherit,
     DWORD ReadMode, DWORD WriteMode)
 {
     RPC_STATUS RpcStatus;
     UUID Uuid;
     WCHAR PipeNameBuf[MAX_PATH];
+    SECURITY_ATTRIBUTES ReadSecurityAttributes = { sizeof(SECURITY_ATTRIBUTES), 0, ReadInherit };
+    SECURITY_ATTRIBUTES WriteSecurityAttributes = { sizeof(SECURITY_ATTRIBUTES), 0, WriteInherit };
     HANDLE ReadPipe, WritePipe;
     DWORD LastError;
 
@@ -46,13 +64,13 @@ BOOL CreateOverlappedPipe(
     ReadPipe = CreateNamedPipeW(PipeNameBuf,
         PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | ReadMode,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        1, Size, Size, 120 * 1000, SecurityAttributes);
+        1, Size, Size, 120 * 1000, &ReadSecurityAttributes);
     if (INVALID_HANDLE_VALUE == ReadPipe)
         return FALSE;
 
     WritePipe = CreateFileW(PipeNameBuf,
         GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        SecurityAttributes, OPEN_EXISTING, WriteMode, 0);
+        &WriteSecurityAttributes, OPEN_EXISTING, WriteMode, 0);
     if (INVALID_HANDLE_VALUE == WritePipe)
     {
         LastError = GetLastError();
@@ -67,6 +85,311 @@ BOOL CreateOverlappedPipe(
     return TRUE;
 }
 
+static NTSTATUS GetTokenUserName(HANDLE Token, PWSTR *PUserName)
+{
+    union
+    {
+        TOKEN_USER V;
+        UINT8 B[128];
+    } UserInfoBuf;
+    PTOKEN_USER UserInfo = &UserInfoBuf.V;
+    WCHAR Name[256], Domn[256];
+    DWORD UserSize, NameSize, DomnSize;
+    SID_NAME_USE Use;
+    PWSTR P;
+    NTSTATUS Result;
+
+    *PUserName = 0;
+
+    if (!GetTokenInformation(Token, TokenUser, UserInfo, sizeof UserInfoBuf, &UserSize))
+    {
+        if (ERROR_INSUFFICIENT_BUFFER != GetLastError())
+        {
+            Result = FspNtStatusFromWin32(GetLastError());
+            goto exit;
+        }
+
+        UserInfo = MemAlloc(UserSize);
+        if (0 == UserInfo)
+        {
+            Result = STATUS_INSUFFICIENT_RESOURCES;
+            goto exit;
+        }
+
+        if (!GetTokenInformation(Token, TokenUser, UserInfo, UserSize, &UserSize))
+        {
+            Result = FspNtStatusFromWin32(GetLastError());
+            goto exit;
+        }
+    }
+
+    NameSize = sizeof Name / sizeof Name[0];
+    DomnSize = sizeof Domn / sizeof Domn[0];
+    if (!LookupAccountSidW(0, UserInfo->User.Sid, Name, &NameSize, Domn, &DomnSize, &Use))
+    {
+        Result = FspNtStatusFromWin32(GetLastError());
+        goto exit;
+    }
+
+    NameSize = lstrlenW(Name);
+    DomnSize = lstrlenW(Domn);
+
+    P = *PUserName = MemAlloc((DomnSize + 1 + NameSize + 1) * sizeof(WCHAR));
+    if (0 == P)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    if (0 < DomnSize)
+    {
+        memcpy(P, Domn, DomnSize * sizeof(WCHAR));
+        P[DomnSize] = L'\\';
+        P += DomnSize + 1;
+    }
+    memcpy(P, Name, NameSize * sizeof(WCHAR));
+    P[NameSize] = L'\0';
+
+    Result = STATUS_SUCCESS;
+
+exit:
+    if (UserInfo != &UserInfoBuf.V)
+        MemFree(UserInfo);
+
+    return Result;
+}
+
+static NTSTATUS AddAccessForTokenUser(HANDLE Handle, DWORD Access, HANDLE Token)
+{
+    union
+    {
+        TOKEN_USER V;
+        UINT8 B[128];
+    } UserInfoBuf;
+    PTOKEN_USER UserInfo = &UserInfoBuf.V;
+    PSECURITY_DESCRIPTOR SecurityDescriptor = 0;
+    PSECURITY_DESCRIPTOR NewSecurityDescriptor = 0;
+    EXPLICIT_ACCESSW AccessEntry;
+    DWORD Size, LastError;
+    NTSTATUS Result;
+
+    if (!GetTokenInformation(Token, TokenUser, UserInfo, sizeof UserInfoBuf, &Size))
+    {
+        if (ERROR_INSUFFICIENT_BUFFER != GetLastError())
+        {
+            Result = FspNtStatusFromWin32(GetLastError());
+            goto exit;
+        }
+
+        UserInfo = MemAlloc(Size);
+        if (0 == UserInfo)
+        {
+            Result = STATUS_INSUFFICIENT_RESOURCES;
+            goto exit;
+        }
+
+        if (!GetTokenInformation(Token, TokenUser, UserInfo, Size, &Size))
+        {
+            Result = FspNtStatusFromWin32(GetLastError());
+            goto exit;
+        }
+    }
+
+    if (GetKernelObjectSecurity(Handle, DACL_SECURITY_INFORMATION, 0, 0, &Size))
+    {
+        Result = STATUS_INVALID_PARAMETER;
+        goto exit;
+    }
+    if (ERROR_INSUFFICIENT_BUFFER != GetLastError())
+    {
+        Result = FspNtStatusFromWin32(GetLastError());
+        goto exit;
+    }
+
+    SecurityDescriptor = MemAlloc(Size);
+    if (0 == SecurityDescriptor)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    if (!GetKernelObjectSecurity(Handle, DACL_SECURITY_INFORMATION, SecurityDescriptor, Size, &Size))
+    {
+        Result = FspNtStatusFromWin32(GetLastError());
+        goto exit;
+    }
+
+    AccessEntry.grfAccessPermissions = Access;
+    AccessEntry.grfAccessMode = GRANT_ACCESS;
+    AccessEntry.grfInheritance = NO_INHERITANCE;
+    AccessEntry.Trustee.pMultipleTrustee = 0;
+    AccessEntry.Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+    AccessEntry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    AccessEntry.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+    AccessEntry.Trustee.ptstrName = UserInfo->User.Sid;
+
+    LastError = BuildSecurityDescriptorW(0, 0, 1, &AccessEntry, 0, 0, SecurityDescriptor,
+        &Size, &NewSecurityDescriptor);
+    if (0 != LastError)
+    {
+        Result = FspNtStatusFromWin32(LastError);
+        goto exit;
+    }
+
+    if (!SetKernelObjectSecurity(Handle, DACL_SECURITY_INFORMATION, NewSecurityDescriptor))
+    {
+        Result = FspNtStatusFromWin32(GetLastError());
+        goto exit;
+    }
+
+    Result = STATUS_SUCCESS;
+
+exit:
+    LocalFree(NewSecurityDescriptor);
+    MemFree(SecurityDescriptor);
+    if (UserInfo != &UserInfoBuf.V)
+        MemFree(UserInfo);
+
+    return Result;
+}
+
+static BOOL LogonCreateProcess(
+    PWSTR UserName,
+    HANDLE Token,
+    LPCWSTR ApplicationName,
+    LPWSTR CommandLine,
+    LPSECURITY_ATTRIBUTES ProcessAttributes,
+    LPSECURITY_ATTRIBUTES ThreadAttributes,
+    BOOL InheritHandles,
+    DWORD CreationFlags,
+    LPVOID Environment,
+    LPCWSTR CurrentDirectory,
+    LPSTARTUPINFOW StartupInfo,
+    LPPROCESS_INFORMATION ProcessInformation)
+{
+    PWSTR DomainName = 0;
+
+    if (0 != UserName)
+    {
+        if (0 == invariant_wcsicmp(UserName, L"LocalSystem"))
+        {
+            UserName = 0;
+            Token = 0;
+        }
+        else
+        if (0 == invariant_wcsicmp(UserName, L"LocalService") ||
+            0 == invariant_wcsicmp(UserName, L"NetworkService"))
+        {
+            DomainName = L"NT AUTHORITY";
+            Token = 0;
+        }
+        else
+        if (0 == invariant_wcsicmp(UserName, L"."))
+            ;
+        else
+        {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+    }
+
+    if (0 == UserName)
+        /* without a user name go ahead and call CreateProcessW */
+        return CreateProcessW(
+            ApplicationName,
+            CommandLine,
+            ProcessAttributes,
+            ThreadAttributes,
+            InheritHandles,
+            CreationFlags,
+            Environment,
+            CurrentDirectory,
+            StartupInfo,
+            ProcessInformation);
+
+    HANDLE LogonToken = 0;
+    PVOID EnvironmentBlock = 0;
+    DWORD SessionId;
+    DWORD LastError;
+    BOOL Success;
+
+    if (0 == Token)
+    {
+        Success = LogonUserW(
+            UserName,
+            DomainName,
+            0,
+            LOGON32_LOGON_SERVICE,
+            LOGON32_PROVIDER_DEFAULT,
+            &LogonToken);
+        if (!Success)
+            goto exit;
+    }
+    else
+    {
+        /* convert the impersonation token to a primary token */
+        Success = DuplicateTokenEx(Token,
+            TOKEN_ALL_ACCESS,
+            0,
+            SecurityAnonymous,
+            TokenPrimary,
+            &LogonToken);
+        if (!Success)
+            goto exit;
+        if (!ProcessIdToSessionId(GetCurrentProcessId(), &SessionId))
+            SessionId = 0;
+        /* place the duplicated token in the service session (session 0) */
+        Success = SetTokenInformation(LogonToken, TokenSessionId, &SessionId, sizeof SessionId);
+        if (!Success)
+            goto exit;
+    }
+
+    if (0 == Environment)
+    {
+        Success = CreateEnvironmentBlock(&EnvironmentBlock, LogonToken, FALSE);
+        if (!Success)
+            goto exit;
+
+        CreationFlags |= CREATE_UNICODE_ENVIRONMENT;
+        Environment = EnvironmentBlock;
+    }
+
+    Success = ImpersonateLoggedOnUser(LogonToken);
+    if (!Success)
+        goto exit;
+
+    Success = CreateProcessAsUserW(
+        LogonToken,
+        ApplicationName,
+        CommandLine,
+        ProcessAttributes,
+        ThreadAttributes,
+        InheritHandles,
+        CreationFlags,
+        Environment,
+        CurrentDirectory,
+        StartupInfo,
+        ProcessInformation);
+
+    if (!RevertToSelf())
+        /* should not happen! */
+        ExitProcess(GetLastError());
+
+exit:
+    if (!Success)
+        LastError = GetLastError();
+
+    if (0 != EnvironmentBlock)
+        DestroyEnvironmentBlock(EnvironmentBlock);
+    if (0 != LogonToken)
+        CloseHandle(LogonToken);
+
+    if (!Success)
+        SetLastError(LastError);
+
+    return Success;
+}
+
 typedef struct
 {
     HANDLE Process;
@@ -75,7 +398,7 @@ typedef struct
 
 static VOID CALLBACK KillProcessWait(PVOID Context, BOOLEAN Timeout);
 
-VOID KillProcess(ULONG ProcessId, HANDLE Process, ULONG Timeout)
+static VOID KillProcess(ULONG ProcessId, HANDLE Process, ULONG Timeout)
 {
     if (GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, ProcessId))
     {
@@ -124,6 +447,11 @@ static VOID CALLBACK KillProcessWait(PVOID Context, BOOLEAN Timeout)
     MemFree(KillProcessData);
 }
 
+#define LAUNCHER_PIPE_DEFAULT_TIMEOUT   (2 * 15000 + 1000)
+#define LAUNCHER_START_WITH_SECRET_TIMEOUT 15000
+#define LAUNCHER_STOP_TIMEOUT           5500
+#define LAUNCHER_KILL_TIMEOUT           5000
+
 typedef struct
 {
     LONG RefCount;
@@ -142,6 +470,17 @@ typedef struct
 static CRITICAL_SECTION SvcInstanceLock;
 static HANDLE SvcInstanceEvent;
 static LIST_ENTRY SvcInstanceList = { &SvcInstanceList, &SvcInstanceList };
+static DWORD SvcInstanceTlsKey = TLS_OUT_OF_INDEXES;
+
+static inline PWSTR SvcInstanceUserName(VOID)
+{
+    return TlsGetValue(SvcInstanceTlsKey);
+}
+
+static inline VOID SvcInstanceSetUserName(PWSTR UserName)
+{
+    TlsSetValue(SvcInstanceTlsKey, UserName);
+}
 
 static VOID CALLBACK SvcInstanceTerminated(PVOID Context, BOOLEAN Timeout);
 
@@ -164,24 +503,19 @@ static SVC_INSTANCE *SvcInstanceLookup(PWSTR ClassName, PWSTR InstanceName)
     return 0;
 }
 
-static ULONG SvcInstanceArgumentLength(PWSTR Arg)
+static inline ULONG SvcInstanceArgumentLength(PWSTR Arg, PWSTR Pattern)
 {
-    ULONG Length;
+    PWSTR PathTransform(PWSTR Dest, PWSTR Arg, PWSTR Pattern);
 
-    Length = 2; /* for beginning and ending quotes */
-    for (PWSTR P = Arg; *P; P++)
-        if (L'"' != *P)
-            Length++;
-
-    return Length;
+    return 2 + (ULONG)(UINT_PTR)PathTransform(0, Arg, Pattern);
 }
 
-static PWSTR SvcInstanceArgumentCopy(PWSTR Dest, PWSTR Arg)
+static inline PWSTR SvcInstanceArgumentCopy(PWSTR Dest, PWSTR Arg, PWSTR Pattern)
 {
+    PWSTR PathTransform(PWSTR Dest, PWSTR Arg, PWSTR Pattern);
+
     *Dest++ = L'"';
-    for (PWSTR P = Arg; *P; P++)
-        if (L'"' != *P)
-            *Dest++ = *P;
+    Dest = PathTransform(Dest, Arg, Pattern);
     *Dest++ = L'"';
 
     return Dest;
@@ -193,6 +527,7 @@ static NTSTATUS SvcInstanceReplaceArguments(PWSTR String, ULONG Argc, PWSTR *Arg
     PWSTR NewString = 0, P, Q;
     PWSTR EmptyArg = L"";
     ULONG Length;
+    PWSTR Pattern;
 
     *PNewString = 0;
 
@@ -202,16 +537,36 @@ static NTSTATUS SvcInstanceReplaceArguments(PWSTR String, ULONG Argc, PWSTR *Arg
         switch (*P)
         {
         case L'%':
+            Pattern = 0;
             P++;
+            if (L'\\' == *P)
+            {
+                Pattern = ++P;
+                while (!(L'\0' == *P ||
+                    (L'0' <= *P && *P <= '9') ||
+                    (L'A' <= *P && *P <= 'Z')))
+                    P++;
+            }
             if (L'0' <= *P && *P <= '9')
             {
                 if (Argc > (ULONG)(*P - L'0'))
-                    Length += SvcInstanceArgumentLength(Argv[*P - L'0']);
+                    Length += SvcInstanceArgumentLength(Argv[*P - L'0'], Pattern);
                 else
-                    Length += SvcInstanceArgumentLength(EmptyArg);
+                    Length += SvcInstanceArgumentLength(EmptyArg, 0);
             }
             else
+            if (L'U' == *P)
+            {
+                if (0 != SvcInstanceUserName())
+                    Length += SvcInstanceArgumentLength(SvcInstanceUserName(), Pattern);
+                else
+                    Length += SvcInstanceArgumentLength(EmptyArg, 0);
+            }
+            else
+            if (*P)
                 Length++;
+            else
+                P--;
             break;
         default:
             Length++;
@@ -228,16 +583,36 @@ static NTSTATUS SvcInstanceReplaceArguments(PWSTR String, ULONG Argc, PWSTR *Arg
         switch (*P)
         {
         case L'%':
+            Pattern = 0;
             P++;
+            if (L'\\' == *P)
+            {
+                Pattern = ++P;
+                while (!(L'\0' == *P ||
+                    (L'0' <= *P && *P <= '9') ||
+                    (L'A' <= *P && *P <= 'Z')))
+                    P++;
+            }
             if (L'0' <= *P && *P <= '9')
             {
                 if (Argc > (ULONG)(*P - L'0'))
-                    Q = SvcInstanceArgumentCopy(Q, Argv[*P - L'0']);
+                    Q = SvcInstanceArgumentCopy(Q, Argv[*P - L'0'], Pattern);
                 else
-                    Q = SvcInstanceArgumentCopy(Q, EmptyArg);
+                    Q = SvcInstanceArgumentCopy(Q, EmptyArg, 0);
             }
             else
+            if (L'U' == *P)
+            {
+                if (0 != SvcInstanceUserName())
+                    Q = SvcInstanceArgumentCopy(Q, SvcInstanceUserName(), Pattern);
+                else
+                    Q = SvcInstanceArgumentCopy(Q, EmptyArg, 0);
+            }
+            else
+            if (*P)
                 *Q++ = *P;
+            else
+                P--;
             break;
         default:
             *Q++ = *P;
@@ -249,6 +624,67 @@ static NTSTATUS SvcInstanceReplaceArguments(PWSTR String, ULONG Argc, PWSTR *Arg
     *PNewString = NewString;
 
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS SvcInstanceAddUserRights(HANDLE Token,
+    PSECURITY_DESCRIPTOR SecurityDescriptor, PSECURITY_DESCRIPTOR *PNewSecurityDescriptor)
+{
+    PSECURITY_DESCRIPTOR NewSecurityDescriptor;
+    TOKEN_USER *User = 0;
+    EXPLICIT_ACCESSW AccessEntry;
+    DWORD Size, LastError;
+    NTSTATUS Result;
+
+    *PNewSecurityDescriptor = 0;
+
+    if (GetTokenInformation(Token, TokenUser, 0, 0, &Size))
+    {
+        Result = STATUS_INVALID_PARAMETER;
+        goto exit;
+    }
+    if (ERROR_INSUFFICIENT_BUFFER != GetLastError())
+    {
+        Result = FspNtStatusFromWin32(GetLastError());
+        goto exit;
+    }
+
+    User = MemAlloc(Size);
+    if (0 == User)
+    {
+        Result = STATUS_INSUFFICIENT_RESOURCES;
+        goto exit;
+    }
+
+    if (!GetTokenInformation(Token, TokenUser, User, Size, &Size))
+    {
+        Result = FspNtStatusFromWin32(GetLastError());
+        goto exit;
+    }
+
+    AccessEntry.grfAccessPermissions = SERVICE_QUERY_STATUS | SERVICE_STOP;
+    AccessEntry.grfAccessMode = GRANT_ACCESS;
+    AccessEntry.grfInheritance = NO_INHERITANCE;
+    AccessEntry.Trustee.pMultipleTrustee = 0;
+    AccessEntry.Trustee.MultipleTrusteeOperation = NO_MULTIPLE_TRUSTEE;
+    AccessEntry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    AccessEntry.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+    AccessEntry.Trustee.ptstrName = User->User.Sid;
+
+    LastError = BuildSecurityDescriptorW(0, 0, 1, &AccessEntry, 0, 0, SecurityDescriptor,
+        &Size, &NewSecurityDescriptor);
+    if (0 != LastError)
+    {
+        Result = FspNtStatusFromWin32(LastError);
+        goto exit;
+    }
+
+    *PNewSecurityDescriptor = NewSecurityDescriptor;
+    Result = STATUS_SUCCESS;
+
+exit:
+    MemFree(User);
+
+    return Result;
 }
 
 static NTSTATUS SvcInstanceAccessCheck(HANDLE ClientToken, ULONG DesiredAccess,
@@ -279,17 +715,34 @@ static NTSTATUS SvcInstanceAccessCheck(HANDLE ClientToken, ULONG DesiredAccess,
     return Result;
 }
 
-NTSTATUS SvcInstanceCreateProcess(PWSTR Executable, PWSTR CommandLine,
+static NTSTATUS SvcInstanceCreateProcess(PWSTR UserName, HANDLE ClientToken,
+    PWSTR Executable, PWSTR CommandLine, PWSTR WorkDirectory,
     HANDLE StdioHandles[2],
     PPROCESS_INFORMATION ProcessInfo)
 {
+    WCHAR WorkDirectoryBuf[MAX_PATH];
     STARTUPINFOEXW StartupInfoEx;
     HANDLE ChildHandles[3] = { INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE, 0/* DO NOT CLOSE!*/ };
     HANDLE ParentHandles[2] = { INVALID_HANDLE_VALUE, INVALID_HANDLE_VALUE };
-    SECURITY_ATTRIBUTES PipeAttributes = { sizeof(SECURITY_ATTRIBUTES), 0, TRUE };
     PPROC_THREAD_ATTRIBUTE_LIST AttrList = 0;
     SIZE_T Size;
     NTSTATUS Result;
+
+    if (0 != WorkDirectory && L'.' == WorkDirectory[0] && L'\0' == WorkDirectory[1])
+    {
+        PWSTR Backslash = 0, P;
+
+        if (0 == GetModuleFileNameW(0, WorkDirectoryBuf, MAX_PATH))
+            return FspNtStatusFromWin32(GetLastError());
+
+        for (P = WorkDirectoryBuf; *P; P++)
+            if (L'\\' == *P)
+                Backslash = P;
+        if (0 != Backslash && WorkDirectoryBuf < Backslash && L':' != Backslash[-1])
+            *Backslash = L'\0';
+
+        WorkDirectory = WorkDirectoryBuf;
+    }
 
     memset(&StartupInfoEx, 0, sizeof StartupInfoEx);
     StartupInfoEx.StartupInfo.cb = sizeof StartupInfoEx.StartupInfo;
@@ -304,16 +757,16 @@ NTSTATUS SvcInstanceCreateProcess(PWSTR Executable, PWSTR CommandLine,
          */
 
         /* create stdin read/write ends; make them inheritable */
-        if (!CreateOverlappedPipe(&ChildHandles[0], &ParentHandles[0], &PipeAttributes, 0,
-            0, 0))
+        if (!CreateOverlappedPipe(&ChildHandles[0], &ParentHandles[0],
+            0, TRUE, FALSE, 0, 0))
         {
             Result = FspNtStatusFromWin32(GetLastError());
             goto exit;
         }
 
         /* create stdout read/write ends; make them inheritable */
-        if (!CreateOverlappedPipe(&ParentHandles[1], &ChildHandles[1], &PipeAttributes, 0,
-            FILE_FLAG_OVERLAPPED, 0))
+        if (!CreateOverlappedPipe(&ParentHandles[1], &ChildHandles[1],
+            0, FALSE, TRUE, FILE_FLAG_OVERLAPPED, 0))
         {
             Result = FspNtStatusFromWin32(GetLastError());
             goto exit;
@@ -357,18 +810,44 @@ NTSTATUS SvcInstanceCreateProcess(PWSTR Executable, PWSTR CommandLine,
         StartupInfoEx.StartupInfo.hStdOutput = ChildHandles[1];
         StartupInfoEx.StartupInfo.hStdError = ChildHandles[2];
 
-        if (!CreateProcessW(Executable, CommandLine, 0, 0, TRUE,
-            CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | EXTENDED_STARTUPINFO_PRESENT, 0, 0,
+        if (!LogonCreateProcess(UserName, ClientToken,
+            Executable, CommandLine, 0, 0, TRUE,
+            CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP | EXTENDED_STARTUPINFO_PRESENT,
+            0, WorkDirectory,
             &StartupInfoEx.StartupInfo, ProcessInfo))
         {
-            Result = FspNtStatusFromWin32(GetLastError());
-            goto exit;
+            if (ERROR_NO_SYSTEM_RESOURCES != GetLastError())
+            {
+                Result = FspNtStatusFromWin32(GetLastError());
+                goto exit;
+            }
+
+            /*
+             * On Win7 CreateProcessW with EXTENDED_STARTUPINFO_PRESENT
+             * may fail with ERROR_NO_SYSTEM_RESOURCES.
+             *
+             * In that case go ahead and retry with a CreateProcessW with
+             * bInheritHandles==TRUE, but without EXTENDED_STARTUPINFO_PRESENT.
+             * Not ideal, but...
+             */
+            StartupInfoEx.StartupInfo.cb = sizeof StartupInfoEx.StartupInfo;
+            if (!LogonCreateProcess(UserName, ClientToken,
+                Executable, CommandLine, 0, 0, TRUE,
+                CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
+                0, WorkDirectory,
+                &StartupInfoEx.StartupInfo, ProcessInfo))
+            {
+                Result = FspNtStatusFromWin32(GetLastError());
+                goto exit;
+            }
         }
     }
     else
     {
-        if (!CreateProcessW(Executable, CommandLine, 0, 0, FALSE,
-            CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP, 0, 0,
+        if (!LogonCreateProcess(UserName, ClientToken,
+            Executable, CommandLine, 0, 0, FALSE,
+            CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
+            0, WorkDirectory,
             &StartupInfoEx.StartupInfo, ProcessInfo))
         {
             Result = FspNtStatusFromWin32(GetLastError());
@@ -411,10 +890,11 @@ NTSTATUS SvcInstanceCreate(HANDLE ClientToken,
     HKEY RegKey = 0;
     DWORD RegResult, RegSize;
     DWORD ClassNameSize, InstanceNameSize;
-    WCHAR Executable[MAX_PATH], CommandLineBuf[512], SecurityBuf[512];
+    WCHAR Executable[MAX_PATH], CommandLineBuf[512], WorkDirectory[MAX_PATH],
+        SecurityBuf[512], RunAsBuf[64];
     PWSTR CommandLine, Security;
     DWORD JobControl, Credentials;
-    PSECURITY_DESCRIPTOR SecurityDescriptor = 0;
+    PSECURITY_DESCRIPTOR SecurityDescriptor = 0, NewSecurityDescriptor;
     PWSTR Argv[10];
     PROCESS_INFORMATION ProcessInfo;
     NTSTATUS Result;
@@ -440,8 +920,8 @@ NTSTATUS SvcInstanceCreate(HANDLE ClientToken,
         goto exit;
     }
 
-    RegResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"" LAUNCHER_REGKEY,
-        0, LAUNCHER_REGKEY_WOW64 | KEY_READ, &RegKey);
+    RegResult = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"" FSP_LAUNCH_REGKEY,
+        0, FSP_LAUNCH_REGKEY_WOW64 | KEY_READ, &RegKey);
     if (ERROR_SUCCESS != RegResult)
     {
         Result = FspNtStatusFromWin32(RegResult);
@@ -488,10 +968,30 @@ NTSTATUS SvcInstanceCreate(HANDLE ClientToken,
         CommandLine[-1] = L'\0';
     CommandLine = CommandLineBuf;
 
+    RegSize = sizeof WorkDirectory;
+    WorkDirectory[0] = L'\0';
+    RegResult = RegGetValueW(RegKey, ClassName, L"WorkDirectory", RRF_RT_REG_SZ, 0,
+        WorkDirectory, &RegSize);
+    if (ERROR_SUCCESS != RegResult && ERROR_FILE_NOT_FOUND != RegResult)
+    {
+        Result = FspNtStatusFromWin32(RegResult);
+        goto exit;
+    }
+
     Security = SecurityBuf + lstrlenW(SecurityBuf);
     RegSize = (DWORD)(sizeof SecurityBuf - (Security - SecurityBuf) * sizeof(WCHAR));
     RegResult = RegGetValueW(RegKey, ClassName, L"Security", RRF_RT_REG_SZ, 0,
         Security, &RegSize);
+    if (ERROR_SUCCESS != RegResult && ERROR_FILE_NOT_FOUND != RegResult)
+    {
+        Result = FspNtStatusFromWin32(RegResult);
+        goto exit;
+    }
+
+    RegSize = sizeof RunAsBuf;
+    RunAsBuf[0] = L'\0';
+    RegResult = RegGetValueW(RegKey, ClassName, L"RunAs", RRF_RT_REG_SZ, 0,
+        RunAsBuf, &RegSize);
     if (ERROR_SUCCESS != RegResult && ERROR_FILE_NOT_FOUND != RegResult)
     {
         Result = FspNtStatusFromWin32(RegResult);
@@ -512,7 +1012,7 @@ NTSTATUS SvcInstanceCreate(HANDLE ClientToken,
     RegKey = 0;
 
     if (L'\0' == Security[0])
-        lstrcpyW(Security, L"" SVC_INSTANCE_DEFAULT_SDDL);
+        lstrcpyW(Security, L"" FSP_LAUNCH_SERVICE_DEFAULT_SDDL);
     if (L'D' == Security[0] && L':' == Security[1])
         Security = SecurityBuf;
 
@@ -528,6 +1028,14 @@ NTSTATUS SvcInstanceCreate(HANDLE ClientToken,
     Result = SvcInstanceAccessCheck(ClientToken, SERVICE_START, SecurityDescriptor);
     if (!NT_SUCCESS(Result))
         goto exit;
+
+    Result = SvcInstanceAddUserRights(ClientToken, SecurityDescriptor, &NewSecurityDescriptor);
+    if (!NT_SUCCESS(Result))
+        goto exit;
+    LocalFree(SecurityDescriptor);
+    SecurityDescriptor = NewSecurityDescriptor;
+
+    //FspDebugLogSD(__FUNCTION__ ": SDDL = %s\n", SecurityDescriptor);
 
     ClassNameSize = (lstrlenW(ClassName) + 1) * sizeof(WCHAR);
     InstanceNameSize = (lstrlenW(InstanceName) + 1) * sizeof(WCHAR);
@@ -553,7 +1061,8 @@ NTSTATUS SvcInstanceCreate(HANDLE ClientToken,
     if (!NT_SUCCESS(Result))
         goto exit;
 
-    Result = SvcInstanceCreateProcess(Executable, SvcInstance->CommandLine,
+    Result = SvcInstanceCreateProcess(L'\0' != RunAsBuf[0] ? RunAsBuf : 0, ClientToken,
+        Executable, SvcInstance->CommandLine, L'\0' != WorkDirectory[0] ? WorkDirectory : 0,
         RedirectStdio ? SvcInstance->StdioHandles : 0, &ProcessInfo);
     if (!NT_SUCCESS(Result))
         goto exit;
@@ -624,6 +1133,9 @@ exit:
 
     LeaveCriticalSection(&SvcInstanceLock);
 
+    FspServiceLog(EVENTLOG_INFORMATION_TYPE,
+        L"create %s\\%s = %lx", ClassName, InstanceName, Result);
+
     return Result;
 }
 
@@ -656,6 +1168,9 @@ static VOID SvcInstanceRelease(SVC_INSTANCE *SvcInstance)
 static VOID CALLBACK SvcInstanceTerminated(PVOID Context, BOOLEAN Timeout)
 {
     SVC_INSTANCE *SvcInstance = Context;
+
+    FspServiceLog(EVENTLOG_INFORMATION_TYPE,
+        L"terminated %s\\%s", SvcInstance->ClassName, SvcInstance->InstanceName);
 
     SvcInstanceRelease(SvcInstance);
 }
@@ -751,6 +1266,10 @@ exit:
     }
 
     SvcInstanceRelease(SvcInstance);
+
+    if (STATUS_TIMEOUT == Result)
+        /* convert to an error! */
+        Result = 0x80070000 | ERROR_TIMEOUT;
 
     return Result;
 }
@@ -885,6 +1404,53 @@ NTSTATUS SvcInstanceStopAndWaitAll(VOID)
     return STATUS_SUCCESS;
 }
 
+NTSTATUS SvcDefineDosDevice(HANDLE ClientToken,
+    PWSTR DeviceName, PWSTR TargetPath)
+{
+    NTSTATUS Result;
+
+    if (L'+' != DeviceName[0] && L'-' != DeviceName[0])
+        return STATUS_INVALID_PARAMETER;
+
+    Result = FspServiceContextCheck(ClientToken, 0);
+    if (!NT_SUCCESS(Result))
+        return Result;
+
+    if (!DefineDosDeviceW(
+        DDD_RAW_TARGET_PATH |
+            (L'+' == DeviceName[0] ? 0 : DDD_REMOVE_DEFINITION | DDD_EXACT_MATCH_ON_REMOVE),
+        DeviceName + 1, TargetPath))
+        return FspNtStatusFromWin32(GetLastError());
+
+    if (L'+' == DeviceName[0] && 0 != SvcNtOpenSymbolicLinkObject)
+    {
+        /* The drive symlink now exists; add DELETE access to it for the ClientToken. */
+        WCHAR SymlinkBuf[6];
+        UNICODE_STRING Symlink;
+        OBJECT_ATTRIBUTES Obja;
+        HANDLE MountHandle;
+
+        memcpy(SymlinkBuf, L"\\??\\X:", sizeof SymlinkBuf);
+        SymlinkBuf[4] = DeviceName[1];
+        Symlink.Length = Symlink.MaximumLength = sizeof SymlinkBuf;
+        Symlink.Buffer = SymlinkBuf;
+
+        memset(&Obja, 0, sizeof Obja);
+        Obja.Length = sizeof Obja;
+        Obja.ObjectName = &Symlink;
+        Obja.Attributes = OBJ_CASE_INSENSITIVE;
+
+        Result = SvcNtOpenSymbolicLinkObject(&MountHandle, READ_CONTROL | WRITE_DAC, &Obja);
+        if (NT_SUCCESS(Result))
+        {
+            AddAccessForTokenUser(MountHandle, DELETE, ClientToken);
+            SvcNtClose(MountHandle);
+        }
+    }
+
+    return STATUS_SUCCESS;
+}
+
 static HANDLE SvcJob, SvcThread, SvcEvent;
 static DWORD SvcThreadId;
 static HANDLE SvcPipe = INVALID_HANDLE_VALUE;
@@ -908,7 +1474,7 @@ static NTSTATUS SvcStart(FSP_SERVICE *Service, ULONG argc, PWSTR *argv)
 
     SecurityAttributes.nLength = sizeof SecurityAttributes;
     SecurityAttributes.bInheritHandle = FALSE;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"" LAUNCHER_PIPE_SDDL, SDDL_REVISION_1,
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"" FSP_LAUNCH_PIPE_SDDL, SDDL_REVISION_1,
         &SecurityAttributes.lpSecurityDescriptor, 0))
         goto fail;
 
@@ -916,6 +1482,10 @@ static NTSTATUS SvcStart(FSP_SERVICE *Service, ULONG argc, PWSTR *argv)
 
     SvcInstanceEvent = CreateEventW(0, TRUE, TRUE, 0);
     if (0 == SvcInstanceEvent)
+        goto fail;
+
+    SvcInstanceTlsKey = TlsAlloc();
+    if (TLS_OUT_OF_INDEXES == SvcInstanceTlsKey)
         goto fail;
 
     SvcJob = CreateJobObjectW(0, 0);
@@ -941,11 +1511,11 @@ static NTSTATUS SvcStart(FSP_SERVICE *Service, ULONG argc, PWSTR *argv)
     if (0 == SvcOverlapped.hEvent)
         goto fail;
 
-    SvcPipe = CreateNamedPipeW(L"" LAUNCHER_PIPE_NAME,
+    SvcPipe = CreateNamedPipeW(L"" FSP_LAUNCH_PIPE_NAME,
         PIPE_ACCESS_DUPLEX |
             FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OVERLAPPED,
         PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        1, LAUNCHER_PIPE_BUFFER_SIZE, LAUNCHER_PIPE_BUFFER_SIZE, LAUNCHER_PIPE_DEFAULT_TIMEOUT,
+        1, FSP_LAUNCH_PIPE_BUFFER_SIZE, FSP_LAUNCH_PIPE_BUFFER_SIZE, LAUNCHER_PIPE_DEFAULT_TIMEOUT,
         &SecurityAttributes);
     if (INVALID_HANDLE_VALUE == SvcPipe)
         goto fail;
@@ -979,6 +1549,9 @@ fail:
 
     if (0 != SvcJob)
         CloseHandle(SvcJob);
+
+    if (TLS_OUT_OF_INDEXES != SvcInstanceTlsKey)
+        TlsFree(SvcInstanceTlsKey);
 
     if (0 != SvcInstanceEvent)
         CloseHandle(SvcInstanceEvent);
@@ -1022,6 +1595,9 @@ static NTSTATUS SvcStop(FSP_SERVICE *Service)
 
     if (0 != SvcJob)
         CloseHandle(SvcJob);
+
+    if (TLS_OUT_OF_INDEXES != SvcInstanceTlsKey)
+        TlsFree(SvcInstanceTlsKey);
 
     if (0 != SvcInstanceEvent)
         CloseHandle(SvcInstanceEvent);
@@ -1067,7 +1643,7 @@ static DWORD WINAPI SvcPipeServer(PVOID Context)
     HANDLE ClientToken;
     DWORD LastError, BytesTransferred;
 
-    PipeBuf = MemAlloc(LAUNCHER_PIPE_BUFFER_SIZE);
+    PipeBuf = MemAlloc(FSP_LAUNCH_PIPE_BUFFER_SIZE);
     if (0 == PipeBuf)
     {
         FspServiceSetExitCode(Service, ERROR_NO_SYSTEM_RESOURCES);
@@ -1090,7 +1666,7 @@ static DWORD WINAPI SvcPipeServer(PVOID Context)
         }
 
         LastError = SvcPipeWaitResult(
-            ReadFile(SvcPipe, PipeBuf, LAUNCHER_PIPE_BUFFER_SIZE, &BytesTransferred, &SvcOverlapped),
+            ReadFile(SvcPipe, PipeBuf, FSP_LAUNCH_PIPE_BUFFER_SIZE, &BytesTransferred, &SvcOverlapped),
             SvcEvent, SvcPipe, &SvcOverlapped, &BytesTransferred);
         if (-1 == LastError)
             break;
@@ -1105,7 +1681,10 @@ static DWORD WINAPI SvcPipeServer(PVOID Context)
 
         ClientToken = 0;
         if (!ImpersonateNamedPipeClient(SvcPipe) ||
-            !OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &ClientToken) ||
+            (
+                !OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_DUPLICATE, FALSE, &ClientToken) &&
+                !OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &ClientToken)
+            ) ||
             !RevertToSelf())
         {
             LastError = GetLastError();
@@ -1180,11 +1759,11 @@ static inline VOID SvcPipeTransactResult(NTSTATUS Result, PWSTR PipeBuf, PULONG 
 {
     if (NT_SUCCESS(Result))
     {
-        *PipeBuf = LauncherSuccess;
+        *PipeBuf = FspLaunchCmdSuccess;
         *PSize += sizeof(WCHAR);
     }
     else
-        *PSize = (wsprintfW(PipeBuf, L"%c%ld", LauncherFailure, FspWin32FromNtStatus(Result)) + 1) *
+        *PSize = (wsprintfW(PipeBuf, L"%c%ld", FspLaunchCmdFailure, FspWin32FromNtStatus(Result)) + 1) *
             sizeof(WCHAR);
 }
 
@@ -1194,19 +1773,23 @@ static VOID SvcPipeTransact(HANDLE ClientToken, PWSTR PipeBuf, PULONG PSize)
         return;
 
     PWSTR P = PipeBuf, PipeBufEnd = PipeBuf + *PSize / sizeof(WCHAR);
-    PWSTR ClassName, InstanceName;
+    PWSTR ClassName, InstanceName, UserName;
+    PWSTR DeviceName, TargetPath;
     ULONG Argc; PWSTR Argv[9];
     BOOLEAN HasSecret = FALSE;
     NTSTATUS Result;
 
     *PSize = 0;
 
+    GetTokenUserName(ClientToken, &UserName);
+    SvcInstanceSetUserName(UserName);
+
     switch (*P++)
     {
-    case LauncherSvcInstanceStartWithSecret:
+    case FspLaunchCmdStartWithSecret:
         HasSecret = TRUE;
         /* fall through! */
-    case LauncherSvcInstanceStart:
+    case FspLaunchCmdStart:
         ClassName = SvcPipeTransactGetPart(&P, PipeBufEnd);
         InstanceName = SvcPipeTransactGetPart(&P, PipeBufEnd);
         for (Argc = 0; sizeof Argv / sizeof Argv[0] > Argc; Argc++)
@@ -1221,7 +1804,7 @@ static VOID SvcPipeTransact(HANDLE ClientToken, PWSTR PipeBuf, PULONG PSize)
         SvcPipeTransactResult(Result, PipeBuf, PSize);
         break;
 
-    case LauncherSvcInstanceStop:
+    case FspLaunchCmdStop:
         ClassName = SvcPipeTransactGetPart(&P, PipeBufEnd);
         InstanceName = SvcPipeTransactGetPart(&P, PipeBufEnd);
 
@@ -1232,29 +1815,40 @@ static VOID SvcPipeTransact(HANDLE ClientToken, PWSTR PipeBuf, PULONG PSize)
         SvcPipeTransactResult(Result, PipeBuf, PSize);
         break;
 
-    case LauncherSvcInstanceInfo:
+    case FspLaunchCmdGetInfo:
         ClassName = SvcPipeTransactGetPart(&P, PipeBufEnd);
         InstanceName = SvcPipeTransactGetPart(&P, PipeBufEnd);
 
         Result = STATUS_INVALID_PARAMETER;
         if (0 != ClassName && 0 != InstanceName)
         {
-            *PSize = LAUNCHER_PIPE_BUFFER_SIZE - 1;
+            *PSize = FSP_LAUNCH_PIPE_BUFFER_SIZE - 1;
             Result = SvcInstanceGetInfo(ClientToken, ClassName, InstanceName, PipeBuf + 1, PSize);
         }
 
         SvcPipeTransactResult(Result, PipeBuf, PSize);
         break;
 
-    case LauncherSvcInstanceList:
-        *PSize = LAUNCHER_PIPE_BUFFER_SIZE - 1;
+    case FspLaunchCmdGetNameList:
+        *PSize = FSP_LAUNCH_PIPE_BUFFER_SIZE - 1;
         Result = SvcInstanceGetNameList(ClientToken, PipeBuf + 1, PSize);
 
         SvcPipeTransactResult(Result, PipeBuf, PSize);
         break;
 
+    case FspLaunchCmdDefineDosDevice:
+        DeviceName = SvcPipeTransactGetPart(&P, PipeBufEnd);
+        TargetPath = SvcPipeTransactGetPart(&P, PipeBufEnd);
+
+        Result = STATUS_INVALID_PARAMETER;
+        if (0 != DeviceName && 0 != TargetPath)
+            Result = SvcDefineDosDevice(ClientToken, DeviceName, TargetPath);
+
+        SvcPipeTransactResult(Result, PipeBuf, PSize);
+        break;
+
 #if !defined(NDEBUG)
-    case LauncherQuit:
+    case FspLaunchCmdQuit:
         SetEvent(SvcEvent);
 
         SvcPipeTransactResult(STATUS_SUCCESS, PipeBuf, PSize);
@@ -1264,10 +1858,26 @@ static VOID SvcPipeTransact(HANDLE ClientToken, PWSTR PipeBuf, PULONG PSize)
         SvcPipeTransactResult(STATUS_INVALID_PARAMETER, PipeBuf, PSize);
         break;
     }
+
+    SvcInstanceSetUserName(0);
+    MemFree(UserName);
 }
 
 int wmain(int argc, wchar_t **argv)
 {
+    HANDLE Handle = GetModuleHandleW(L"ntdll.dll");
+    if (0 != Handle)
+    {
+        SvcNtOpenSymbolicLinkObject = (PVOID)GetProcAddress(Handle, "NtOpenSymbolicLinkObject");
+        SvcNtClose = (PVOID)GetProcAddress(Handle, "NtClose");
+
+        if (0 == SvcNtOpenSymbolicLinkObject || 0 == SvcNtClose)
+        {
+            SvcNtOpenSymbolicLinkObject = 0;
+            SvcNtClose = 0;
+        }
+    }
+
     return FspServiceRun(L"" PROGNAME, SvcStart, SvcStop, 0);
 }
 
